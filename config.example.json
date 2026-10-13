@@ -1,0 +1,8 @@
+{
+  "data": "./data",
+  "listen": "0.0.0.0:10293",
+  "admin_username": "admin",
+  "admin_password": "",
+  "session_secret": "",
+  "statement_password": "GoJustCPC"
+}
