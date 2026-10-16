@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"time"
 
 	"justcpc-exam-server/src/store"
@@ -121,7 +121,7 @@ func (s Service) Export(ctx context.Context, actor string) (ExportResult, []byte
 			if !ok {
 				continue
 			}
-			target := filepath.Join("submissions", contestant.StudentID, item.Label, "source."+extension(entry.language))
+			target := path.Join("submissions", contestant.StudentID, item.Label, "source."+extension(entry.language))
 			if err := write(target, entry.source); err != nil {
 				return ExportResult{}, nil, err
 			}

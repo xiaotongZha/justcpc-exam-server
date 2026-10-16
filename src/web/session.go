@@ -17,8 +17,9 @@ const (
 )
 
 type principal struct {
-	Role string // "student" 或 "admin"
-	ID   int64  // 考生 ID；管理员为 0
+	Role           string // "student" 或 "admin"
+	ID             int64  // 考生 ID；管理员为 0
+	ExamGeneration int64
 }
 
 type sessionManager struct {
@@ -39,6 +40,9 @@ func newSessionManager(secret string, duration time.Duration) (*sessionManager, 
 func (m *sessionManager) set(writer http.ResponseWriter, cookie string, value principal) {
 	expires := time.Now().Add(m.duration).Unix()
 	payload := fmt.Sprintf("%s|%d|%d", value.Role, value.ID, expires)
+	if value.Role == "student" {
+		payload += "|" + strconv.FormatInt(value.ExamGeneration, 10)
+	}
 	encoded := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	http.SetCookie(writer, &http.Cookie{
 		Name: cookie, Value: encoded + "." + m.sign(encoded), Path: "/",
@@ -64,7 +68,7 @@ func (m *sessionManager) parse(request *http.Request, cookie string) (principal,
 		return principal{}, false
 	}
 	values := strings.Split(string(decoded), "|")
-	if len(values) != 3 {
+	if len(values) != 3 && len(values) != 4 {
 		return principal{}, false
 	}
 	expires, err := strconv.ParseInt(values[2], 10, 64)
@@ -78,7 +82,18 @@ func (m *sessionManager) parse(request *http.Request, cookie string) (principal,
 	if values[0] != "student" && values[0] != "admin" {
 		return principal{}, false
 	}
-	return principal{Role: values[0], ID: id}, true
+	var generation int64
+	if values[0] == "student" {
+		// 升级前没有场次信息的学生 Cookie 需要重新登录；管理员会话保持兼容。
+		if len(values) != 4 {
+			return principal{}, false
+		}
+		generation, err = strconv.ParseInt(values[3], 10, 64)
+		if err != nil || generation <= 0 {
+			return principal{}, false
+		}
+	}
+	return principal{Role: values[0], ID: id, ExamGeneration: generation}, true
 }
 
 func (m *sessionManager) sign(value string) string {

@@ -37,7 +37,7 @@ func (s Server) studentLogin(c *gin.Context) {
 		return
 	}
 	s.Exam.MarkContestantIP(c, contestant.ID, clientIP(c))
-	s.sessions.set(c.Writer, studentCookie, principal{Role: "student", ID: contestant.ID})
+	s.sessions.set(c.Writer, studentCookie, principal{Role: "student", ID: contestant.ID, ExamGeneration: contestant.ExamGeneration})
 	c.JSON(http.StatusOK, contestant)
 }
 
@@ -217,8 +217,8 @@ func (s Server) studentEarlySubmit(c *gin.Context) {
 }
 
 var (
-	errTooMany        = &apiError{"操作过于频繁，请稍后再试"}
-	errNoStatement    = &apiError{"比赛题面缺失"}
+	errTooMany         = &apiError{"操作过于频繁，请稍后再试"}
+	errNoStatement     = &apiError{"比赛题面缺失"}
 	errConfirmRequired = &apiError{"需要确认后才能交卷"}
 )
 

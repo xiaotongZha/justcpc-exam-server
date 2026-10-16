@@ -118,6 +118,16 @@ func (s Server) requireStudent(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
+	valid, err := s.Exam.StudentSessionValid(c, value.ID, value.ExamGeneration)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	if !valid {
+		s.sessions.clear(c.Writer, studentCookie)
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "考试已更换，请重新登录"})
+		return
+	}
 	if s.activity != nil {
 		s.activity.touch(value.ID)
 	}

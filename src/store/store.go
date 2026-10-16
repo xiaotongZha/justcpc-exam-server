@@ -141,6 +141,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE exam ADD COLUMN contest_id INTEGER`,
 		`ALTER TABLE exam ADD COLUMN exam_start_at TEXT`,
 		`ALTER TABLE exam ADD COLUMN exam_end_at TEXT`,
+		`ALTER TABLE exam ADD COLUMN generation INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE problems ADD COLUMN oj_problem_id INTEGER`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(err.Error(), "duplicate column name") {

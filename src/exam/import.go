@@ -75,25 +75,49 @@ func (s Service) Import(ctx context.Context, actor string, archive []byte) (Exam
 		}{item.StudentID, item.Name, string(hash)})
 	}
 
-	_, err = store.WithTx(ctx, s.Store.DB, func(tx *sql.Tx) (struct{}, error) {
+	// 先把题面完整写入独立目录。数据库切换前的任何失败都保留旧考试和源码。
+	statementRoot := s.Store.Absolute("contest-statements")
+	if err := os.MkdirAll(statementRoot, 0700); err != nil {
+		return Exam{}, err
+	}
+	statementDir, err := os.MkdirTemp(statementRoot, "exam-")
+	if err != nil {
+		return Exam{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(statementDir)
+		}
+	}()
+	statementPath := filepath.Join("contest-statements", filepath.Base(statementDir), "statement.pdf")
+	if err := s.Store.WriteFile(statementPath, data.statement); err != nil {
+		return Exam{}, err
+	}
+
+	var oldStatement sql.NullString
+	item, err := store.WithTx(ctx, s.Store.DB, func(tx *sql.Tx) (Exam, error) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM submissions`); err != nil {
-			return struct{}{}, err
+			return Exam{}, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT statement_pdf_path FROM exam WHERE id=1`).Scan(&oldStatement); err != nil {
+			return Exam{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM contestants`); err != nil {
-			return struct{}{}, err
+			return Exam{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM problems`); err != nil {
-			return struct{}{}, err
+			return Exam{}, err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE exam SET contest_id=?,name=?,description=?,exam_start_at=NULL,exam_end_at=NULL,statement_pdf_path=NULL,state='not_started',started_at=NULL,finished_at=NULL WHERE id=1`,
-			data.manifest.ContestID, data.manifest.Name, data.manifest.Description); err != nil {
-			return struct{}{}, err
+			`UPDATE exam SET generation=generation+1,contest_id=?,name=?,description=?,exam_start_at=NULL,exam_end_at=NULL,statement_pdf_path=?,state='not_started',started_at=NULL,finished_at=NULL WHERE id=1`,
+			data.manifest.ContestID, data.manifest.Name, data.manifest.Description, statementPath); err != nil {
+			return Exam{}, err
 		}
 		for index, item := range data.manifest.Problems {
 			score, err := ParseScore(item.Score)
 			if err != nil {
-				return struct{}{}, fmt.Errorf("contest.json：题目 %s：%w", item.Label, err)
+				return Exam{}, fmt.Errorf("contest.json：题目 %s：%w", item.Label, err)
 			}
 			limits := item.Limits
 			if len(limits) == 0 {
@@ -102,41 +126,40 @@ func (s Service) Import(ctx context.Context, actor string, archive []byte) (Exam
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO problems(oj_problem_id,label,title,score_cents,resource_limits_json,order_index) VALUES(?,?,?,?,?,?)`,
 				item.ProblemID, item.Label, item.Title, score, string(limits), index); err != nil {
-				return struct{}{}, err
+				return Exam{}, err
 			}
 		}
 		for _, item := range prepared {
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO contestants(student_id,name,password_hash,disabled,finished,created_at,updated_at) VALUES(?,?,?,0,0,?,?)`,
 				item.studentID, item.name, item.hash, store.Now(), store.Now()); err != nil {
-				return struct{}{}, fmt.Errorf("写入考生 %s：%w", item.studentID, err)
+				return Exam{}, fmt.Errorf("写入考生 %s：%w", item.studentID, err)
 			}
 		}
-		return struct{}{}, auditTx(ctx, tx, actor, "exam.import", "exam", "1", map[string]any{
+		if err := auditTx(ctx, tx, actor, "exam.import", "exam", "1", map[string]any{
 			"name": data.manifest.Name, "problems": len(data.manifest.Problems), "contestants": len(prepared),
-		})
+		}); err != nil {
+			return Exam{}, err
+		}
+		return scanExam(ctx, tx)
 	})
 	if err != nil {
 		return Exam{}, err
 	}
-	// 提交记录已整体清空，删除对应的源码文件，避免新提交复用旧文件。
+	committed = true
+	// 切换成功后再清理旧文件，数据库回滚时不会损失先前的提交。
 	clearDirectory(s.Store.Absolute("submissions"))
-
-	statementPath := filepath.Join("contest-statements", "statement.pdf")
-	if err := s.Store.WriteFile(statementPath, data.statement); err != nil {
-		return Exam{}, err
-	}
-	if _, err := s.Store.DB.ExecContext(ctx, `UPDATE exam SET statement_pdf_path=? WHERE id=1`, statementPath); err != nil {
-		return Exam{}, err
-	}
-	exam, err := s.Exam(ctx)
-	if err != nil {
-		return exam, err
+	if oldStatement.Valid && oldStatement.String != "" {
+		oldPath := s.Store.Absolute(oldStatement.String)
+		_ = os.Remove(oldPath)
+		if oldDir := filepath.Dir(oldPath); oldDir != statementRoot {
+			_ = os.Remove(oldDir) // 仅移除空的旧题面目录，不影响其他导入。
+		}
 	}
 	s.notify("submission")
 	s.notify("contestant")
 	s.notify("exam")
-	return exam, nil
+	return item, nil
 }
 
 // clearDirectory 删除目录下的全部内容（不删除目录本身）。

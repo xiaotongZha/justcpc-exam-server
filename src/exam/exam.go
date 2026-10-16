@@ -30,8 +30,8 @@ const (
 const bcryptCost = 8
 
 var (
-	ErrForbidden   = errors.New("permission denied")
-	ErrExamNotOpen = errors.New("exam is not running")
+	ErrForbidden    = errors.New("permission denied")
+	ErrExamNotOpen  = errors.New("exam is not running")
 	ErrInvalidState = errors.New("invalid exam state transition")
 )
 
@@ -52,6 +52,7 @@ func (s Service) notify(kind string) {
 
 type Exam struct {
 	ID               int64   `json:"id"`
+	Generation       int64   `json:"-"` // 每次导入递增，隔离不同场次的学生会话与自动状态迁移。
 	ContestID        int64   `json:"contest_id"`
 	Name             string  `json:"name"`
 	Description      string  `json:"description"`
@@ -76,15 +77,16 @@ type Problem struct {
 }
 
 type Contestant struct {
-	ID         int64   `json:"id"`
-	StudentID  string  `json:"student_id"`
-	Name       string  `json:"name"`
-	Disabled   bool    `json:"disabled"`
-	Finished   bool    `json:"finished"`
-	FinishedAt *string `json:"finished_at,omitempty"`
-	IP         string  `json:"ip,omitempty"`
-	CreatedAt  string  `json:"created_at"`
-	UpdatedAt  string  `json:"updated_at"`
+	ID             int64   `json:"id"`
+	ExamGeneration int64   `json:"-"` // 与登录凭据在同一次查询中读取。
+	StudentID      string  `json:"student_id"`
+	Name           string  `json:"name"`
+	Disabled       bool    `json:"disabled"`
+	Finished       bool    `json:"finished"`
+	FinishedAt     *string `json:"finished_at,omitempty"`
+	IP             string  `json:"ip,omitempty"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 type Submission struct {
@@ -119,8 +121,8 @@ func (s Service) exam(ctx context.Context) (Exam, error) {
 	var statement sql.NullString
 	var started, finished sql.NullString
 	err := s.Store.DB.QueryRowContext(ctx,
-		`SELECT id,COALESCE(contest_id,0),name,description,statement_pdf_path,state,started_at,finished_at,COALESCE(exam_start_at,''),COALESCE(exam_end_at,''),created_at FROM exam WHERE id=1`).
-		Scan(&item.ID, &item.ContestID, &item.Name, &item.Description, &statement, &item.State, &started, &finished, &item.ExamStartAt, &item.ExamEndAt, &item.CreatedAt)
+		`SELECT id,generation,COALESCE(contest_id,0),name,description,statement_pdf_path,state,started_at,finished_at,COALESCE(exam_start_at,''),COALESCE(exam_end_at,''),created_at FROM exam WHERE id=1`).
+		Scan(&item.ID, &item.Generation, &item.ContestID, &item.Name, &item.Description, &statement, &item.State, &started, &finished, &item.ExamStartAt, &item.ExamEndAt, &item.CreatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -314,6 +316,9 @@ func (s Service) Restart(ctx context.Context, actor string, clearSubmissions boo
 			start, end); err != nil {
 			return struct{}{}, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE contestants SET finished=0,finished_at=NULL,updated_at=?`, store.Now()); err != nil {
+			return struct{}{}, err
+		}
 		return struct{}{}, auditTx(ctx, tx, actor, "exam.restart", "exam", "1", map[string]any{
 			"clear_submissions": clearSubmissions, "removed": len(removedIDs), "start": start, "end": end,
 		})
@@ -328,6 +333,7 @@ func (s Service) Restart(ctx context.Context, actor string, clearSubmissions boo
 	if clearSubmissions {
 		s.notify("submission")
 	}
+	s.notify("contestant")
 	// s.Exam 会按新的起止时间懒推进状态，并在此后广播变更。
 	exam, err := s.Exam(ctx)
 	if err != nil {
@@ -372,7 +378,37 @@ func (s Service) AutoAdvance(ctx context.Context, exam Exam) (Exam, error) {
 		action = "start"
 		reason = "到达开始时间，自动开始"
 	}
-	return s.SetState(ctx, "system", action, reason)
+	// 条件更新作为事务的第一条语句：旧快照不能覆盖新的时间安排或手动状态，
+	// 多个请求同时到达时间边界时也只推进、审计和广播一次。
+	changed := false
+	item, err := store.WithTx(ctx, s.Store.DB, func(tx *sql.Tx) (Exam, error) {
+		query := `UPDATE exam SET state=?,finished_at=? WHERE id=1 AND generation=? AND state=? AND COALESCE(exam_start_at,'')=? AND COALESCE(exam_end_at,'')=?`
+		if target == StateRunning {
+			query = `UPDATE exam SET state=?,started_at=COALESCE(started_at,?),finished_at=NULL WHERE id=1 AND generation=? AND state=? AND COALESCE(exam_start_at,'')=? AND COALESCE(exam_end_at,'')=?`
+		}
+		result, err := tx.ExecContext(ctx, query, target, store.Now(), exam.Generation, exam.State, exam.ExamStartAt, exam.ExamEndAt)
+		if err != nil {
+			return Exam{}, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return Exam{}, err
+		}
+		changed = count != 0
+		if changed {
+			if err := auditTx(ctx, tx, "system", "exam."+action, "exam", "1", map[string]any{"from": exam.State, "to": target, "reason": reason}); err != nil {
+				return Exam{}, err
+			}
+		}
+		return scanExam(ctx, tx)
+	})
+	if err != nil {
+		return Exam{}, err
+	}
+	if changed {
+		s.notify("exam")
+	}
+	return item, nil
 }
 
 // RunAutoAdvance 周期性检查并按时间推进状态（s.Exam 内部完成切换与广播）。
@@ -396,8 +432,8 @@ func scanExam(ctx context.Context, tx *sql.Tx) (Exam, error) {
 	var item Exam
 	var statement, started, finished sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT id,COALESCE(contest_id,0),name,description,statement_pdf_path,state,started_at,finished_at,COALESCE(exam_start_at,''),COALESCE(exam_end_at,''),created_at FROM exam WHERE id=1`).
-		Scan(&item.ID, &item.ContestID, &item.Name, &item.Description, &statement, &item.State, &started, &finished, &item.ExamStartAt, &item.ExamEndAt, &item.CreatedAt)
+		`SELECT id,generation,COALESCE(contest_id,0),name,description,statement_pdf_path,state,started_at,finished_at,COALESCE(exam_start_at,''),COALESCE(exam_end_at,''),created_at FROM exam WHERE id=1`).
+		Scan(&item.ID, &item.Generation, &item.ContestID, &item.Name, &item.Description, &statement, &item.State, &started, &finished, &item.ExamStartAt, &item.ExamEndAt, &item.CreatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -537,9 +573,9 @@ func (s Service) AuthenticateContestant(ctx context.Context, studentID, password
 	var hash string
 	var finished sql.NullString
 	err := s.Store.DB.QueryRowContext(ctx,
-		`SELECT id,student_id,name,disabled,finished,finished_at,ip,created_at,updated_at,password_hash FROM contestants WHERE student_id=?`,
+		`SELECT c.id,c.student_id,c.name,c.disabled,c.finished,c.finished_at,c.ip,c.created_at,c.updated_at,c.password_hash,e.generation FROM contestants c CROSS JOIN exam e WHERE c.student_id=? AND e.id=1`,
 		strings.TrimSpace(studentID)).
-		Scan(&item.ID, &item.StudentID, &item.Name, &item.Disabled, &item.Finished, &finished, &item.IP, &item.CreatedAt, &item.UpdatedAt, &hash)
+		Scan(&item.ID, &item.StudentID, &item.Name, &item.Disabled, &item.Finished, &finished, &item.IP, &item.CreatedAt, &item.UpdatedAt, &hash, &item.ExamGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Contestant{}, errors.New("学号或密码错误")
 	}
@@ -556,6 +592,15 @@ func (s Service) AuthenticateContestant(ctx context.Context, studentID, password
 		return Contestant{}, ErrDisabled
 	}
 	return item, nil
+}
+
+// StudentSessionValid 验证会话仍属于当前导入的考试，防止考生 ID 复用后串号。
+func (s Service) StudentSessionValid(ctx context.Context, contestantID, generation int64) (bool, error) {
+	var valid bool
+	err := s.Store.DB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM exam e JOIN contestants c ON c.id=? WHERE e.id=1 AND e.generation=?)`,
+		contestantID, generation).Scan(&valid)
+	return valid, err
 }
 
 func (s Service) AddContestant(ctx context.Context, actor, studentID, name, password, reason string) (Contestant, error) {
