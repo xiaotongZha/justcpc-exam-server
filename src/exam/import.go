@@ -28,6 +28,7 @@ type problemSpec struct {
 }
 
 type manifest struct {
+	PackageType string        `json:"package_type"`
 	ContestID   int64         `json:"contest_id"`
 	Name        string        `json:"name"`
 	Description string        `json:"description"`
@@ -49,6 +50,8 @@ type packageData struct {
 // Import 读取并校验 Online Judge 导出的考试包，替换当前考试数据。
 // 包结构：contest.json、statement.pdf、contestants.csv（题目按 problem_id 引用，不含测试数据）。
 func (s Service) Import(ctx context.Context, actor string, archive []byte) (Exam, error) {
+	s.Store.SourceMu.Lock()
+	defer s.Store.SourceMu.Unlock()
 	data, err := readPackage(archive)
 	if err != nil {
 		return Exam{}, err
@@ -60,11 +63,7 @@ func (s Service) Import(ctx context.Context, actor string, archive []byte) (Exam
 		hash      string
 	}, 0, len(data.contestants))
 	for _, item := range data.contestants {
-		password := item.Password
-		if password == "" {
-			password = item.StudentID
-		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(item.Password), bcryptCost)
 		if err != nil {
 			return Exam{}, err
 		}
@@ -198,6 +197,9 @@ func readPackage(archive []byte) (packageData, error) {
 		if err != nil {
 			return packageData{}, err
 		}
+		if strings.HasPrefix(entry.Name, "submissions/") {
+			return packageData{}, errors.New("这是提交包，请回到 OJ 比赛详情导入；这里需要 OJ 导出的考试包")
+		}
 		files[entry.Name] = content
 	}
 
@@ -208,6 +210,12 @@ func readPackage(archive []byte) (packageData, error) {
 	}
 	if err := json.Unmarshal(manifestBytes, &data.manifest); err != nil {
 		return data, fmt.Errorf("contest.json 无法解析：%w", err)
+	}
+	if data.manifest.PackageType != "" && data.manifest.PackageType != "exam" {
+		return data, errors.New("包类型错误：这里仅接受 OJ 导出的考试包，提交包应回到 OJ 导入")
+	}
+	if data.manifest.ContestID <= 0 {
+		return data, errors.New("考试包缺少平台比赛 ID，请从 OJ 重新导出考试包")
 	}
 	if strings.TrimSpace(data.manifest.Name) == "" || len(data.manifest.Problems) == 0 {
 		return data, errors.New("contest.json 必须包含 name 和 problems")
@@ -241,20 +249,30 @@ func readPackage(archive []byte) (packageData, error) {
 	if err != nil {
 		return data, fmt.Errorf("contestants.csv：%w", err)
 	}
-	if len(rows) < 1 || len(rows[0]) < 2 || rows[0][0] != "student_id" || rows[0][1] != "name" {
-		return data, errors.New("contestants.csv 表头必须是 student_id,name[,password]")
+	if len(rows) < 1 || len(rows[0]) != 3 || rows[0][0] != "student_id" || rows[0][1] != "name" || rows[0][2] != "password" {
+		return data, errors.New("考试包名单必须包含 student_id,name,password 三列；旧包请在 OJ 补齐密码后重新导出考试包")
 	}
 	students := map[string]bool{}
-	for _, row := range rows[1:] {
-		if len(row) < 2 || strings.TrimSpace(row[0]) == "" || strings.TrimSpace(row[1]) == "" || students[row[0]] {
-			return data, errors.New("contestants.csv 存在非法或重复的考生")
+	for i, row := range rows[1:] {
+		if len(row) != 3 {
+			return data, fmt.Errorf("contestants.csv 第 %d 行必须为 3 列", i+2)
+		}
+		for j := range row {
+			row[j] = strings.TrimSpace(row[j])
+		}
+		for j, field := range []string{"student_id", "name", "password"} {
+			if row[j] == "" {
+				return data, fmt.Errorf("contestants.csv 第 %d 行 %s 不能为空；请在 OJ 补齐后重新导出考试包", i+2, field)
+			}
+		}
+		if students[row[0]] {
+			return data, fmt.Errorf("contestants.csv 第 %d 行 student_id 重复", i+2)
+		}
+		if len(row[2]) > 72 {
+			return data, fmt.Errorf("contestants.csv 第 %d 行 password 超过 72 字节", i+2)
 		}
 		students[row[0]] = true
-		password := ""
-		if len(row) >= 3 {
-			password = strings.TrimSpace(row[2])
-		}
-		data.contestants = append(data.contestants, contestantInput{row[0], row[1], password})
+		data.contestants = append(data.contestants, contestantInput{row[0], row[1], row[2]})
 	}
 	if len(data.contestants) == 0 {
 		return data, errors.New("contestants.csv 没有考生")
@@ -264,8 +282,25 @@ func readPackage(archive []byte) (packageData, error) {
 		switch path {
 		case "contest.json", "statement.pdf", "contestants.csv":
 		default:
-			return data, fmt.Errorf("包中存在多余文件 %s（本题库仅接受 OJ 导出的考试包）", path)
+			return data, fmt.Errorf("包中存在多余文件 %s（这里仅接受 OJ 导出的考试包）", path)
 		}
 	}
 	return data, nil
+}
+
+// ImportPreview 只展示比赛与题目信息，不返回名单密码，不修改当前考试。
+type ImportPreview struct {
+	ContestID       int64         `json:"contest_id"`
+	Name            string        `json:"name"`
+	ProblemCount    int           `json:"problem_count"`
+	ContestantCount int           `json:"contestant_count"`
+	Problems        []problemSpec `json:"problems"`
+}
+
+func (s Service) PreviewImport(archive []byte) (ImportPreview, error) {
+	data, err := readPackage(archive)
+	if err != nil {
+		return ImportPreview{}, err
+	}
+	return ImportPreview{ContestID: data.manifest.ContestID, Name: data.manifest.Name, ProblemCount: len(data.manifest.Problems), ContestantCount: len(data.contestants), Problems: data.manifest.Problems}, nil
 }

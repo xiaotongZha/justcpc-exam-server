@@ -18,9 +18,9 @@ func (s Server) adminEvents(c *gin.Context) {
 	s.streamEvents(c, nil)
 }
 
-// studentEvents 只推送考试状态事件，避免提交事件在学生端引发刷新风暴。
+// studentEvents 关注考试与考生状态，交卷或禁用时立即断开失效会话。
 func (s Server) studentEvents(c *gin.Context) {
-	s.streamEvents(c, []string{"exam"})
+	s.streamEvents(c, []string{"exam", "contestant"})
 }
 
 // streamEvents 以 Server-Sent Events 保持长连接并推送事件。
@@ -34,13 +34,15 @@ func (s Server) streamEvents(c *gin.Context, topics []string) {
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no") // 若前置 nginx，需关闭缓冲
+	ch := s.events.subscribe(topics...)
+	defer s.events.unsubscribe(ch)
 	c.Writer.WriteHeader(http.StatusOK)
 	fmt.Fprint(c.Writer, "retry: 3000\n: connected\n\n")
 	flusher.Flush()
 
-	ch := s.events.subscribe(topics...)
-	defer s.events.unsubscribe(ch)
-
+	if !s.eventSessionValid(c) {
+		return
+	}
 	heartbeat := time.NewTicker(sseHeartbeat)
 	defer heartbeat.Stop()
 	clientGone := c.Request.Context().Done()
@@ -55,6 +57,9 @@ func (s Server) streamEvents(c *gin.Context, topics []string) {
 			if !open {
 				return
 			}
+			if !s.eventSessionValid(c) {
+				return
+			}
 			payload, err := json.Marshal(event)
 			if err != nil {
 				continue
@@ -64,6 +69,9 @@ func (s Server) streamEvents(c *gin.Context, topics []string) {
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
+			if !s.eventSessionValid(c) {
+				return
+			}
 			s.touchActivity(c)
 			if _, err := io.WriteString(c.Writer, ": ping\n\n"); err != nil {
 				return
@@ -83,4 +91,22 @@ func (s Server) touchActivity(c *gin.Context) {
 			s.activity.touch(who.ID)
 		}
 	}
+}
+
+// eventSessionValid 不依赖前端轮询，失效时发送专用事件并关闭连接。
+func (s Server) eventSessionValid(c *gin.Context) bool {
+	who := s.user(c)
+	if who.Role != "student" {
+		return true
+	}
+	valid, err := s.Exam.StudentSessionValid(c.Request.Context(), who.ID, who.ExamGeneration, who.SessionVersion)
+	if err != nil {
+		return false
+	}
+	if !valid {
+		fmt.Fprint(c.Writer, "event: session-ended\ndata: {}\n\n")
+		c.Writer.Flush()
+		return false
+	}
+	return true
 }

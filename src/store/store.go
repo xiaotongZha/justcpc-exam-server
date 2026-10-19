@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,17 +17,19 @@ const TimeLayout = "2006-01-02 15:04:05"
 
 var beijing = time.FixedZone("Asia/Shanghai", 8*60*60)
 
-// DefaultRules 是首次运行时写入的考生守则（每行一条，可在管理端修改）。
-const DefaultRules = `请核对右上角姓名与学号，如有误立即举手示意管理员。
-本系统仅用于发放题面与收集代码，不显示对错、不显示分数；提交仅表示已保存。
-支持语言：C++、Java、Python 3。每题以最后一次提交作为赛后评测对象，历史提交均保留。
-在题目列表点击「作答」进入提交页，选择题目与语言后粘贴源码提交。
-禁止访问互联网、使用通讯工具或与他人交流，禁止干扰考试系统与服务器。
-「提前交卷」不可撤销，交卷后无法再提交代码，请谨慎操作。
-遇到系统异常请举手联系现场管理员，不要自行刷新或关闭页面。`
+// DefaultRules 是首次运行时写入的考生须知（每行一条，可在管理端修改）。
+const DefaultRules = `请核对页面上方的姓名与学号。如有错误，请立即举手示意监考员。
+本系统支持 C/C++、Java 和 Python。提交代码前，请确认所选编程语言与源码一致；因语言选择错误造成的后果由考生自行承担。
+本系统仅用于发放题面和收集代码，不进行现场评测。提交成功仅表示代码已保存，不代表答案正确。
+完成题目的速度不影响最终排名。请认真检查代码，并确认最终提交的版本无误。
+开考后如遇设备故障，请举手示意志愿者，不得擅自更换座位；如遇考试系统故障，请耐心等待技术人员处理。
+考生如需提前离场，请先点击“提前交卷”并确认交卷，再举手示意监考员，经允许后方可离场。提前交卷后将无法再次登录考试或提交代码。
+比赛期间，请将手机、书包放在教室前方或后方的指定位置。禁止携带任何纸质或电子资料，禁止交谈、窥视他人答题，禁止使用与考试无关的通信或存储设备。
+一经发现作弊，立即取消参赛资格，并通报考生所在学院、教务处及创新学院，按规定给予相应的违纪处分；大学期间禁止参加算法类竞赛！！！`
 
 // Store 负责 SQLite 迁移、事务与本地文件目录。
 type Store struct {
+	SourceMu sync.RWMutex // 协调源码替换、读取、导出与考试数据切换。
 	DB       *sql.DB
 	DataRoot string
 }
@@ -131,6 +134,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO settings(key,value) VALUES('rules',?)`, DefaultRules); err != nil {
 		return fmt.Errorf("seed default rules: %w", err)
 	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE settings SET value=? WHERE key='rules' AND value=?`, DefaultRules, `请核对右上角姓名与学号，如有误立即举手示意管理员。
+本系统仅用于发放题面与收集代码，不显示对错、不显示分数；提交仅表示已保存。
+支持语言：C++、Java、Python 3。每题以最后一次提交作为赛后评测对象，历史提交均保留。
+在题目列表点击「作答」进入提交页，选择题目与语言后粘贴源码提交。
+禁止访问互联网、使用通讯工具或与他人交流，禁止干扰考试系统与服务器。
+「提前交卷」不可撤销，交卷后无法再提交代码，请谨慎操作。
+遇到系统异常请举手联系现场管理员，不要自行刷新或关闭页面。`); err != nil {
+		return fmt.Errorf("update default rules: %w", err)
+	}
 	_, err := s.DB.ExecContext(ctx,
 		`INSERT OR IGNORE INTO exam(id,name,description,state,created_at) VALUES(1,'','','not_started',?)`,
 		Now())
@@ -143,6 +155,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`ALTER TABLE exam ADD COLUMN exam_end_at TEXT`,
 		`ALTER TABLE exam ADD COLUMN generation INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE problems ADD COLUMN oj_problem_id INTEGER`,
+		`ALTER TABLE contestants ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("alter table: %w", err)
@@ -203,6 +216,10 @@ func (s *Store) WriteFile(relative string, data []byte) error {
 		return err
 	}
 	if err := temporary.Chmod(0600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
 		temporary.Close()
 		return err
 	}

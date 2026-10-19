@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"justcpc-exam-server/src/store"
@@ -22,9 +23,10 @@ type submissionProblem struct {
 }
 
 type submissionManifest struct {
-	ContestID int64               `json:"contest_id"`
-	Name      string              `json:"name"`
-	Problems  []submissionProblem `json:"problems"`
+	PackageType string              `json:"package_type"`
+	ContestID   int64               `json:"contest_id"`
+	Name        string              `json:"name"`
+	Problems    []submissionProblem `json:"problems"`
 }
 
 type ExportResult struct {
@@ -39,6 +41,8 @@ type ExportResult struct {
 // Export 生成提交包：contest.json（题目 ID 引用）+ contestants.csv（最终名单）+ submissions/。
 // 每题每人只导出最后一次提交源码，不含测试数据与题面；由浏览器直接下载，不在系统内存储。
 func (s Service) Export(ctx context.Context, actor string) (ExportResult, []byte, error) {
+	s.Store.SourceMu.RLock()
+	defer s.Store.SourceMu.RUnlock()
 	examState, err := s.Exam(ctx)
 	if err != nil {
 		return ExportResult{}, nil, err
@@ -91,7 +95,7 @@ func (s Service) Export(ctx context.Context, actor string) (ExportResult, []byte
 		return err
 	}
 
-	manifest := submissionManifest{ContestID: examState.ContestID, Name: examState.Name}
+	manifest := submissionManifest{PackageType: "submissions", ContestID: examState.ContestID, Name: examState.Name}
 	for _, item := range problems {
 		manifest.Problems = append(manifest.Problems, submissionProblem{
 			ProblemID: item.OJProblemID, Label: item.Label, Title: item.Title, Score: item.Score,
@@ -133,7 +137,17 @@ func (s Service) Export(ctx context.Context, actor string) (ExportResult, []byte
 	}
 
 	timestamp := time.Now().Format("20060102_150405")
-	fileName := fmt.Sprintf("submission-package-%d-%s.zip", examState.ContestID, timestamp)
+	safeName := strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"/\|?*`, r) {
+			return '-'
+		}
+		return r
+	}, examState.Name)
+	nameRunes := []rune(strings.Trim(safeName, " ."))
+	if len(nameRunes) > 64 {
+		nameRunes = nameRunes[:64]
+	}
+	fileName := fmt.Sprintf("提交包-%s-%d-%s.zip", string(nameRunes), examState.ContestID, timestamp)
 	result := ExportResult{
 		FileName:        fileName,
 		GeneratedAt:     store.Now(),

@@ -78,6 +78,7 @@ type Problem struct {
 
 type Contestant struct {
 	ID             int64   `json:"id"`
+	SessionVersion int64   `json:"-"`
 	ExamGeneration int64   `json:"-"` // 与登录凭据在同一次查询中读取。
 	StudentID      string  `json:"student_id"`
 	Name           string  `json:"name"`
@@ -136,8 +137,8 @@ func (s Service) exam(ctx context.Context) (Exam, error) {
 	return item, nil
 }
 
-// SetState 执行考试状态迁移并记录审计。reason 用于例外操作说明。
-func (s Service) SetState(ctx context.Context, actor, action, reason string) (Exam, error) {
+// SetState 执行考试状态迁移并记录审计。
+func (s Service) SetState(ctx context.Context, actor, action string) (Exam, error) {
 	next, err := stateFor(action)
 	if err != nil {
 		return Exam{}, err
@@ -162,7 +163,7 @@ func (s Service) SetState(ctx context.Context, actor, action, reason string) (Ex
 		if err != nil {
 			return Exam{}, err
 		}
-		if err := auditTx(ctx, tx, actor, "exam."+action, "exam", "1", map[string]any{"from": current, "to": next, "reason": reason}); err != nil {
+		if err := auditTx(ctx, tx, actor, "exam."+action, "exam", "1", map[string]any{"from": current, "to": next}); err != nil {
 			return Exam{}, err
 		}
 		item, err := scanExam(ctx, tx)
@@ -244,7 +245,7 @@ func (s Service) Schedule(ctx context.Context, actor, start, end string) (Exam, 
 }
 
 // Abort 强行中止比赛：立即结束并清空已设定的起止时间，之后可重新设定时间再开赛。
-func (s Service) Abort(ctx context.Context, actor, reason string) (Exam, error) {
+func (s Service) Abort(ctx context.Context, actor string) (Exam, error) {
 	// 先按时间懒推进，避免边界时刻误判当前状态。
 	if _, err := s.Exam(ctx); err != nil {
 		return Exam{}, err
@@ -262,7 +263,7 @@ func (s Service) Abort(ctx context.Context, actor, reason string) (Exam, error) 
 			`UPDATE exam SET state=?, finished_at=?, exam_start_at=NULL, exam_end_at=NULL WHERE id=1`, StateFinished, now); err != nil {
 			return Exam{}, err
 		}
-		if err := auditTx(ctx, tx, actor, "exam.abort", "exam", "1", map[string]any{"from": current, "reason": reason}); err != nil {
+		if err := auditTx(ctx, tx, actor, "exam.abort", "exam", "1", map[string]any{"from": current}); err != nil {
 			return Exam{}, err
 		}
 		return scanExam(ctx, tx)
@@ -276,6 +277,8 @@ func (s Service) Abort(ctx context.Context, actor, reason string) (Exam, error) 
 
 // Restart 重新开始比赛：重置为未开始并设定新的起止时间；可选择清空先前提交。
 func (s Service) Restart(ctx context.Context, actor string, clearSubmissions bool, start, end string) (Exam, error) {
+	s.Store.SourceMu.Lock()
+	defer s.Store.SourceMu.Unlock()
 	startTime, start, err := parseExamTime(start)
 	if err != nil {
 		return Exam{}, fmt.Errorf("开始时间：%w", err)
@@ -289,19 +292,22 @@ func (s Service) Restart(ctx context.Context, actor string, clearSubmissions boo
 	}
 
 	var removedIDs []int64
+	var removedPaths []string
 	_, err = store.WithTx(ctx, s.Store.DB, func(tx *sql.Tx) (struct{}, error) {
 		if clearSubmissions {
-			rows, err := tx.QueryContext(ctx, `SELECT id FROM submissions`)
+			rows, err := tx.QueryContext(ctx, `SELECT id,source_path FROM submissions`)
 			if err != nil {
 				return struct{}{}, err
 			}
 			for rows.Next() {
 				var id int64
-				if err := rows.Scan(&id); err != nil {
+				var path string
+				if err := rows.Scan(&id, &path); err != nil {
 					rows.Close()
 					return struct{}{}, err
 				}
 				removedIDs = append(removedIDs, id)
+				removedPaths = append(removedPaths, path)
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
@@ -325,6 +331,12 @@ func (s Service) Restart(ctx context.Context, actor string, clearSubmissions boo
 	})
 	if err != nil {
 		return Exam{}, err
+	}
+	for _, path := range removedPaths {
+		if path != "" {
+			_ = os.Remove(s.Store.Absolute(path))
+			_ = os.Remove(filepath.Dir(s.Store.Absolute(path)))
+		}
 	}
 	for _, id := range removedIDs {
 		_ = os.RemoveAll(s.Store.Absolute(filepath.Join("submissions", strconv.FormatInt(id, 10))))
@@ -373,10 +385,8 @@ func (s Service) AutoAdvance(ctx context.Context, exam Exam) (Exam, error) {
 		return exam, nil
 	}
 	action := "finish"
-	reason := "到达截止时间，自动结束"
 	if target == StateRunning {
 		action = "start"
-		reason = "到达开始时间，自动开始"
 	}
 	// 条件更新作为事务的第一条语句：旧快照不能覆盖新的时间安排或手动状态，
 	// 多个请求同时到达时间边界时也只推进、审计和广播一次。
@@ -396,7 +406,7 @@ func (s Service) AutoAdvance(ctx context.Context, exam Exam) (Exam, error) {
 		}
 		changed = count != 0
 		if changed {
-			if err := auditTx(ctx, tx, "system", "exam."+action, "exam", "1", map[string]any{"from": exam.State, "to": target, "reason": reason}); err != nil {
+			if err := auditTx(ctx, tx, "system", "exam."+action, "exam", "1", map[string]any{"from": exam.State, "to": target}); err != nil {
 				return Exam{}, err
 			}
 		}
@@ -484,16 +494,9 @@ func (s Service) AuthenticateAdmin(ctx context.Context, username, password strin
 	return nil
 }
 
-func (s Service) UpdateAdminPassword(ctx context.Context, actor, oldPassword, newPassword string) error {
+func (s Service) UpdateAdminPassword(ctx context.Context, actor, newPassword string) error {
 	if newPassword == "" {
 		return errors.New("新密码不能为空")
-	}
-	var hash string
-	if err := s.Store.DB.QueryRowContext(ctx, `SELECT password_hash FROM admin WHERE id=1`).Scan(&hash); err != nil {
-		return err
-	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(oldPassword)) != nil {
-		return errors.New("原密码错误")
 	}
 	next, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcryptCost)
 	if err != nil {
@@ -573,9 +576,9 @@ func (s Service) AuthenticateContestant(ctx context.Context, studentID, password
 	var hash string
 	var finished sql.NullString
 	err := s.Store.DB.QueryRowContext(ctx,
-		`SELECT c.id,c.student_id,c.name,c.disabled,c.finished,c.finished_at,c.ip,c.created_at,c.updated_at,c.password_hash,e.generation FROM contestants c CROSS JOIN exam e WHERE c.student_id=? AND e.id=1`,
+		`SELECT c.id,c.student_id,c.name,c.disabled,c.finished,c.finished_at,c.ip,c.created_at,c.updated_at,c.password_hash,e.generation,c.session_version FROM contestants c CROSS JOIN exam e WHERE c.student_id=? AND e.id=1`,
 		strings.TrimSpace(studentID)).
-		Scan(&item.ID, &item.StudentID, &item.Name, &item.Disabled, &item.Finished, &finished, &item.IP, &item.CreatedAt, &item.UpdatedAt, &hash, &item.ExamGeneration)
+		Scan(&item.ID, &item.StudentID, &item.Name, &item.Disabled, &item.Finished, &finished, &item.IP, &item.CreatedAt, &item.UpdatedAt, &hash, &item.ExamGeneration, &item.SessionVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Contestant{}, errors.New("学号或密码错误")
 	}
@@ -591,19 +594,22 @@ func (s Service) AuthenticateContestant(ctx context.Context, studentID, password
 	if item.Disabled {
 		return Contestant{}, ErrDisabled
 	}
+	if item.Finished {
+		return Contestant{}, ErrFinished
+	}
 	return item, nil
 }
 
-// StudentSessionValid 验证会话仍属于当前导入的考试，防止考生 ID 复用后串号。
-func (s Service) StudentSessionValid(ctx context.Context, contestantID, generation int64) (bool, error) {
+// StudentSessionValid 同时验证考试场次、禁用及交卷状态。
+func (s Service) StudentSessionValid(ctx context.Context, contestantID, generation, version int64) (bool, error) {
 	var valid bool
 	err := s.Store.DB.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM exam e JOIN contestants c ON c.id=? WHERE e.id=1 AND e.generation=?)`,
-		contestantID, generation).Scan(&valid)
+		`SELECT EXISTS(SELECT 1 FROM exam e JOIN contestants c ON c.id=? WHERE e.id=1 AND e.generation=? AND c.disabled=0 AND c.finished=0 AND c.session_version=?)`,
+		contestantID, generation, version).Scan(&valid)
 	return valid, err
 }
 
-func (s Service) AddContestant(ctx context.Context, actor, studentID, name, password, reason string) (Contestant, error) {
+func (s Service) AddContestant(ctx context.Context, actor, studentID, name, password string) (Contestant, error) {
 	studentID = strings.TrimSpace(studentID)
 	name = strings.TrimSpace(name)
 	if studentID == "" || name == "" {
@@ -627,7 +633,7 @@ func (s Service) AddContestant(ctx context.Context, actor, studentID, name, pass
 		}
 		id, _ = result.LastInsertId()
 		return struct{}{}, auditTx(ctx, tx, actor, "contestant.add", "contestant", strconv.FormatInt(id, 10),
-			map[string]any{"student_id": studentID, "name": name, "reason": reason})
+			map[string]any{"student_id": studentID, "name": name})
 	})
 	if err != nil {
 		return Contestant{}, err
@@ -641,7 +647,6 @@ type ContestantUpdate struct {
 	Password string
 	Disabled *bool
 	Finished *bool
-	Reason   string
 }
 
 func (s Service) UpdateContestant(ctx context.Context, actor string, id int64, input ContestantUpdate) (Contestant, error) {
@@ -668,9 +673,9 @@ func (s Service) UpdateContestant(ctx context.Context, actor string, id int64, i
 		if input.Finished != nil {
 			finishedFlag = *input.Finished
 		}
-		changed := map[string]any{"reason": input.Reason}
-		if _, err := tx.ExecContext(ctx, `UPDATE contestants SET name=?, disabled=?, finished=?, updated_at=? WHERE id=?`,
-			name, boolInt(disabled), boolInt(finishedFlag), store.Now(), id); err != nil {
+		changed := map[string]any{}
+		if _, err := tx.ExecContext(ctx, `UPDATE contestants SET name=?, disabled=?, finished=?, finished_at=CASE WHEN ?=0 THEN NULL ELSE finished_at END, session_version=session_version+CASE WHEN disabled<>? OR finished<>? THEN 1 ELSE 0 END, updated_at=? WHERE id=?`,
+			name, boolInt(disabled), boolInt(finishedFlag), boolInt(finishedFlag), boolInt(disabled), boolInt(finishedFlag), store.Now(), id); err != nil {
 			return Contestant{}, err
 		}
 		if input.Password != "" {
@@ -709,7 +714,7 @@ func (s Service) MarkContestantIP(ctx context.Context, id int64, ip string) {
 	_, _ = s.Store.DB.ExecContext(ctx, `UPDATE contestants SET ip=? WHERE id=?`, ip, id)
 }
 
-// Rules 返回当前考生守则文本（每行一条）。
+// Rules 返回当前考生须知文本（每行一条）。
 func (s Service) Rules(ctx context.Context) (string, error) {
 	var value string
 	err := s.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='rules'`).Scan(&value)
@@ -719,7 +724,7 @@ func (s Service) Rules(ctx context.Context) (string, error) {
 	return value, err
 }
 
-// SetRules 更新考生守则文本并记录审计。
+// SetRules 更新考生须知文本并记录审计。
 func (s Service) SetRules(ctx context.Context, actor, value string) (string, error) {
 	if _, err := s.Store.DB.ExecContext(ctx,
 		`INSERT INTO settings(key,value) VALUES('rules',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, value); err != nil {

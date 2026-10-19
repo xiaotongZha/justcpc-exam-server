@@ -8,12 +8,19 @@ const state = {
   tab: 'overview',
   status: null,
   checks: [],
+  pagination: Object.fromEntries(
+    ['contestants', 'submissions', 'audit'].map((key) => [
+      key,
+      { page: 1, page_size: 20, total: 0, loading: false }
+    ])
+  ),
   contestants: [],
   submissions: [],
   audit: [],
   error: '',
   notice: '',
   exporting: false,
+  importPreviewing: false,
   dialog: null,
   timeEditor: null,
   timeDrafts: {},
@@ -40,7 +47,7 @@ const tabs = [
   ['overview', '考场总览', 'monitor'],
   ['contestants', '考生管理', 'users'],
   ['submissions', '提交记录', 'file'],
-  ['rules', '考生守则', 'rules'],
+  ['rules', '考生须知', 'rules'],
   ['system', '系统设置', 'settings']
 ]
 const formValue = (form, field) => form.elements.namedItem(field)?.value ?? ''
@@ -48,6 +55,9 @@ const formChecked = (form, field) => Boolean(form.elements.namedItem(field)?.che
 const htmlCache = {}
 let eventSource = null,
   refreshTimer = null
+let overviewRenderedKey = ''
+const pageRequests = { contestants: 0, submissions: 0, audit: 0 }
+const pageLabels = { contestants: '考生管理', submissions: '提交记录', audit: '操作记录' }
 
 async function api(path, options = {}) {
   const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }
@@ -333,24 +343,69 @@ function guarded(fn) {
   refresh.flush = () => (pending ? refresh() : Promise.resolve())
   return refresh
 }
-function queryString() {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(state.filter)) if (value) params.set(key, value)
-  return params.size ? '?' + params : ''
+function pageQuery(kind, target = {}) {
+  const page = { ...state.pagination[kind], ...target }
+  const params = new URLSearchParams({ page: page.page, page_size: page.page_size })
+  const filter =
+    kind === 'contestants' ? state.peopleFilter : kind === 'submissions' ? state.filter : {}
+  for (const [key, value] of Object.entries(filter)) if (value) params.set(key, value)
+  return '?' + params
+}
+function applyPage(kind) {
+  if (kind === 'contestants') applyContestants()
+  else if (kind === 'submissions') applySubmissions()
+  else applyAudit()
+}
+async function loadPage(kind, target = {}) {
+  const request = ++pageRequests[kind],
+    session = state.admin
+  state.pagination[kind].loading = true
+  applyPage(kind)
+  try {
+    const data = await api('/admin/' + kind + pageQuery(kind, target))
+    if (request !== pageRequests[kind] || state.admin !== session) return
+    state[kind] = data.items || []
+    Object.assign(state.pagination[kind], {
+      page: data.page,
+      page_size: data.page_size,
+      total: data.total
+    })
+  } finally {
+    if (request === pageRequests[kind]) {
+      state.pagination[kind].loading = false
+      applyPage(kind)
+    }
+  }
+}
+function pageNumbers(page, total) {
+  return [...new Set([1, total, page - 1, page, page + 1])]
+    .filter((n) => n >= 1 && n <= total)
+    .sort((a, b) => a - b)
+}
+function pagination(kind) {
+  const p = state.pagination[kind],
+    pages = Math.max(1, Math.ceil(p.total / p.page_size))
+  const buttons = pageNumbers(p.page, pages)
+    .map(
+      (number, index, list) =>
+        `${index && number - list[index - 1] > 1 ? '<span class="page-ellipsis" aria-hidden="true">…</span>' : ''}<button type="button" data-page-kind="${kind}" data-page="${number}" aria-label="第 ${number} 页" ${number === p.page ? 'aria-current="page"' : ''} ${p.loading || number === p.page ? 'disabled' : ''}>${number}</button>`
+    )
+    .join('')
+  return `<nav class="table-pagination" aria-label="${pageLabels[kind]}分页" aria-busy="${p.loading}"><span class="pagination-total" role="status">${p.loading ? '正在加载…' : `共 ${p.total} 条 · 第 ${p.page} / ${pages} 页`}</span><label class="page-size">每页<select data-page-size="${kind}" aria-label="${pageLabels[kind]}每页条数" ${p.loading ? 'disabled' : ''}>${[10, 20, 50, 100].map((n) => `<option value="${n}" ${n === p.page_size ? 'selected' : ''}>${n} 条</option>`).join('')}</select></label><div class="page-buttons"><button type="button" data-page-kind="${kind}" data-page="${p.page - 1}" aria-label="上一页" ${p.loading || p.page <= 1 ? 'disabled' : ''}>${ui.icon('back')}</button>${buttons}<button type="button" data-page-kind="${kind}" data-page="${p.page + 1}" aria-label="下一页" ${p.loading || p.page >= pages ? 'disabled' : ''}>${ui.icon('arrow')}</button></div></nav>`
+}
+function applyPagination(kind) {
+  setHTML(kind + '-pagination', pagination(kind))
 }
 async function refresh() {
-  const [status, checks, contestants, submissions, audit] = await Promise.all([
+  const [status, checks] = await Promise.all([
     api('/admin/status'),
     api('/admin/checks'),
-    api('/admin/contestants'),
-    api('/admin/submissions' + queryString()),
-    api('/admin/audit')
+    loadPage('contestants'),
+    loadPage('submissions'),
+    loadPage('audit')
   ])
   state.status = status
   state.checks = checks || []
-  state.contestants = contestants || []
-  state.submissions = submissions || []
-  state.audit = audit || []
 }
 async function boot() {
   try {
@@ -475,20 +530,8 @@ function recentRows() {
         .join('')
     : '<tr><td colspan="5" class="empty-cell">暂无提交，开考后将在此显示最新收录。</td></tr>'
 }
-function filteredContestants() {
-  const q = state.peopleFilter.query.toLowerCase(),
-    status = state.peopleFilter.status
-  return state.contestants.filter(
-    (c) =>
-      `${c.student_id} ${c.name}`.toLowerCase().includes(q) &&
-      (!status ||
-        (status === 'disabled' && c.disabled) ||
-        (status === 'finished' && c.finished) ||
-        (status === 'normal' && !c.disabled && !c.finished))
-  )
-}
 function contestantRows() {
-  const rows = filteredContestants()
+  const rows = state.contestants
   return rows.length
     ? rows
         .map(
@@ -505,8 +548,8 @@ function submissionRows() {
 }
 const auditLabels = {
   'exam.schedule': '设定考试时间',
-  'exam.rules.update': '更新考生守则',
-  'exam.import': '导入比赛包',
+  'exam.rules.update': '更新考生须知',
+  'exam.import': '导入考试包',
   'exam.export': '导出提交包',
   'exam.restart': '重新开考',
   'exam.pause': '暂停考试',
@@ -541,9 +584,11 @@ function applyOverview() {
   setText('exam-schedule', scheduleText(exam))
   setText('countdown', ui.clockValue(exam))
   setText('countdown-label', ui.clockLabel(exam))
+  const overviewTimer = document.getElementById('overview-timer')
+  if (overviewTimer) overviewTimer.hidden = examDisplayState(exam) === 'finished'
   setHTML('exam-actions', examActions())
   const schedule = document.getElementById('schedule-btn')
-  if (schedule) schedule.hidden = !canSchedule(exam)
+  if (schedule) schedule.hidden = !canSchedule(exam) || Boolean(state.timeEditor)
   setText('stat-online', status.online ?? 0)
   setText('stat-contestants', status.contestant_count ?? 0)
   setText('stat-problems', status.problem_count ?? 0)
@@ -552,24 +597,28 @@ function applyOverview() {
   setHTML('checks-body', checksRows())
   setHTML('by-problem-body', byProblemRows())
   setHTML('recent-body', recentRows())
+  applyPackageActions()
 }
 function applyContestants() {
   setHTML('contestants-body', contestantRows())
-  setText(
-    'contestants-count',
-    `当前匹配 ${filteredContestants().length} 人 / 名单共 ${state.contestants.length} 人`
-  )
+  applyPagination('contestants')
 }
 function applySubmissions() {
   setHTML('submissions-body', submissionRows())
-  setText('submissions-count', `当前显示 ${state.submissions.length} 条收录记录`)
+  applyPagination('submissions')
 }
 function applyAudit() {
   setHTML('audit-body', auditRows())
+  applyPagination('audit')
+}
+function overviewKey() {
+  return `${hasExam()}:${state.status?.exam?.contest_id}:${examDisplayState(state.status?.exam)}`
 }
 const refreshStatus = guarded(async () => {
   state.status = await api('/admin/status')
-  applyOverview()
+  if (overviewRenderedKey !== overviewKey() && state.tab === 'overview' && !state.timeEditor)
+    render()
+  else applyOverview()
 })
 const pollChecks = guarded(async () => {
   if (state.tab === 'overview') {
@@ -579,22 +628,13 @@ const pollChecks = guarded(async () => {
   }
 })
 const pollContestants = guarded(async () => {
-  if (state.tab === 'contestants') {
-    state.contestants = (await api('/admin/contestants')) || []
-    applyContestants()
-  }
+  if (state.tab === 'contestants') await loadPage('contestants')
 })
 const pollSubmissions = guarded(async () => {
-  if (state.tab === 'submissions') {
-    state.submissions = (await api('/admin/submissions' + queryString())) || []
-    applySubmissions()
-  }
+  if (state.tab === 'submissions') await loadPage('submissions')
 })
 const pollAudit = guarded(async () => {
-  if (state.tab === 'system') {
-    state.audit = (await api('/admin/audit')) || []
-    applyAudit()
-  }
+  if (state.tab === 'system') await loadPage('audit')
 })
 function examActions() {
   const phase = examDisplayState(state.status?.exam)
@@ -616,15 +656,17 @@ function renderLogin() {
   document.getElementById('login-form').addEventListener('submit', login)
 }
 function renderOverview() {
+  overviewRenderedKey = overviewKey()
   const s = state.status || {},
-    needsChecks = examDisplayState(s.exam) !== 'running' || state.checks.some((c) => !c.ok)
-  return `<section class="control-strip"><div><span id="exam-state">${examChip(examDisplayState(s.exam))}</span><h2 id="exam-name" style="margin-top:10px">${escapeHtml(s.exam?.name || '尚未导入比赛')}</h2><p class="schedule" id="exam-schedule">${escapeHtml(scheduleText(s.exam))}</p></div><div class="timer"><span id="countdown-label">${ui.clockLabel(s.exam)}</span><strong id="countdown">${ui.clockValue(s.exam)}</strong></div><div class="row"><button id="schedule-btn" ${canSchedule(s.exam) ? '' : 'hidden'}>设定考试时间</button><span id="exam-actions">${examActions()}</span></div></section>${renderTimeEditor()}<section class="overview-stats" aria-label="考场数据"><div class="stat"><div class="t">近 5 分钟活跃考生</div><div class="n"><span id="stat-online">${s.online ?? 0}</span><small> / <span id="stat-contestants">${s.contestant_count ?? 0}</span> 人</small></div></div><div class="stat"><div class="t">源码提交总数</div><div class="n"><span id="stat-submissions">${s.submission_count ?? 0}</span><small> 次</small></div></div><div class="stat"><div class="t">比赛题目</div><div class="n"><span id="stat-problems">${s.problem_count ?? 0}</span><small> 题</small></div></div></section><div class="workspace-grid"><section class="card"><header><h3>最近收录</h3><button class="text-button" data-tab="submissions">全部记录${ui.icon('arrow')}</button></header><div class="table-scroll"><table class="recent-table"><thead><tr><th>考生</th><th>题目</th><th>语言</th><th>时间</th><th></th></tr></thead><tbody id="recent-body">${recentRows()}</tbody></table></div></section><section class="card"><header><h3>各题提交人数</h3><span class="muted small">非通过人数</span></header><div class="body"><div id="by-problem-body">${byProblemRows()}</div><p class="muted small">同一考生同一题只计一人。</p></div></section></div><details class="checks" ${needsChecks ? 'open' : ''}><summary>启动检查 <span id="checks-status">${checksSummary()}</span></summary><div class="table-scroll"><table><thead><tr><th>检查项目</th><th>状态</th><th>说明</th></tr></thead><tbody id="checks-body">${checksRows()}</tbody></table></div></details><div class="overview-bottom"><button class="text-button danger-text" data-exam="abort" ${['running', 'paused'].includes(examDisplayState(s.exam)) ? '' : 'hidden'} id="abort-exam">中止考试…</button></div>`
+    needsChecks = !state.timeEditor && state.checks.some((c) => !c.ok)
+  if (!hasExam()) return renderImportStart()
+  return `<section class="control-strip"><div><span id="exam-state">${examChip(examDisplayState(s.exam))}</span><h2 id="exam-name" style="margin-top:10px">${escapeHtml(s.exam?.name || '尚未导入比赛')}</h2><p class="small muted">${s.problem_count ?? 0} 道题 · ${s.contestant_count ?? 0} 位考生</p><p class="schedule" id="exam-schedule">${escapeHtml(scheduleText(s.exam))}</p></div><div class="timer" id="overview-timer" ${examDisplayState(s.exam) === 'finished' ? 'hidden' : ''}><span id="countdown-label">${ui.clockLabel(s.exam)}</span><strong id="countdown">${ui.clockValue(s.exam)}</strong></div><div class="row"><button class="${examDisplayState(s.exam) === 'unset' ? 'primary' : ''}" id="schedule-btn" ${canSchedule(s.exam) && !state.timeEditor ? '' : 'hidden'}>${examDisplayState(s.exam) === 'unset' ? '下一步：设定考试时间' : '修改考试时间'}</button><span id="exam-actions">${examActions()}</span></div></section>${renderTimeEditor()}<section class="overview-stats" aria-label="考场数据"><div class="stat"><div class="t">近 5 分钟活跃考生</div><div class="n"><span id="stat-online">${s.online ?? 0}</span><small> / <span id="stat-contestants">${s.contestant_count ?? 0}</span> 人</small></div></div><div class="stat"><div class="t">当前有效代码</div><div class="n"><span id="stat-submissions">${s.submission_count ?? 0}</span><small> 份</small></div></div><div class="stat"><div class="t">比赛题目</div><div class="n"><span id="stat-problems">${s.problem_count ?? 0}</span><small> 题</small></div></div></section>${['running', 'paused', 'finished'].includes(examDisplayState(s.exam)) ? `<div class="workspace-grid"><section class="card"><header><h3>最近收录</h3><button class="text-button" data-tab="submissions">全部记录${ui.icon('arrow')}</button></header><div class="table-scroll"><table class="recent-table"><thead><tr><th>考生</th><th>题目</th><th>语言</th><th>时间</th><th></th></tr></thead><tbody id="recent-body">${recentRows()}</tbody></table></div></section><section class="card"><header><h3>各题提交人数</h3><span class="muted small">非通过人数</span></header><div class="body"><div id="by-problem-body">${byProblemRows()}</div><p class="muted small">同一考生同一题只计一人。</p></div></section></div>` : ''}<details class="checks" ${needsChecks ? 'open' : ''}><summary>启动检查 <span id="checks-status">${checksSummary()}</span></summary><div class="table-scroll"><table><thead><tr><th>检查项目</th><th>状态</th><th>说明</th></tr></thead><tbody id="checks-body">${checksRows()}</tbody></table></div></details><div class="overview-bottom"><button class="text-button danger-text" data-exam="abort" ${['running', 'paused'].includes(examDisplayState(s.exam)) ? '' : 'hidden'} id="abort-exam">中止考试…</button></div>`
 }
 function renderContestants() {
-  return `<section class="card"><header><div><h2>考生名单</h2><p class="muted small">账户可用状态与交卷状态分别显示。</p></div><button class="primary" id="add-contestant">新增临时考生</button></header><div class="toolbar"><label><span>查找考生</span><input id="people-search" placeholder="学号或姓名" value="${escapeHtml(state.peopleFilter.query)}"></label><label class="compact-field"><span>状态筛选</span><select id="people-status"><option value="">全部状态</option><option value="normal">可用且未交卷</option><option value="finished">已交卷</option><option value="disabled">已禁用</option></select></label></div><div class="filter-summary" id="contestants-count"></div><div class="table-scroll"><table><thead><tr><th>学号</th><th>姓名</th><th>账户状态</th><th>交卷状态</th><th>最近 IP</th><th>操作</th></tr></thead><tbody id="contestants-body">${contestantRows()}</tbody></table></div></section>`
+  return `<section class="card"><header><div><h2>考生名单</h2><p class="muted small">账户可用状态与交卷状态分别显示。</p></div><button class="primary" id="add-contestant">新增临时考生</button></header><div class="toolbar"><label><span>查找考生</span><input id="people-search" placeholder="学号或姓名" value="${escapeHtml(state.peopleFilter.query)}"></label><label class="compact-field"><span>状态筛选</span><select id="people-status"><option value="">全部状态</option><option value="normal">可用且未交卷</option><option value="finished">已交卷</option><option value="disabled">已禁用</option></select></label></div><div class="table-scroll"><table class="paged-table"><thead><tr><th>学号</th><th>姓名</th><th>账户状态</th><th>交卷状态</th><th>最近 IP</th><th>操作</th></tr></thead><tbody id="contestants-body">${contestantRows()}</tbody></table></div><div id="contestants-pagination">${pagination('contestants')}</div></section>`
 }
 function renderSubmissions() {
-  return `<section class="card"><header><div><h2>提交收录记录</h2><p class="muted small">收录表示服务器保存了源码，不包含判题结果。</p></div></header><form class="toolbar" id="submission-filter"><label><span>学号</span><input id="f-student" placeholder="输入完整学号" value="${escapeHtml(state.filter.student_id)}"></label><label class="compact-field"><span>题号</span><input id="f-label" placeholder="例如 A" value="${escapeHtml(state.filter.label)}"></label><label class="compact-field"><span>语言</span><select id="f-language"><option value="">全部语言</option><option value="cpp">C++</option><option value="java">Java</option><option value="python3">Python 3</option></select></label><button type="submit" id="f-apply">筛选记录</button><button type="button" class="ghost" id="f-reset">重置</button></form><div class="filter-summary" id="submissions-count"></div><div class="table-scroll"><table><thead><tr><th>编号</th><th>考生</th><th>题目</th><th>语言</th><th>收录时间</th><th>操作</th></tr></thead><tbody id="submissions-body">${submissionRows()}</tbody></table></div></section>`
+  return `<section class="card"><header><div><h2>提交收录记录</h2><p class="muted small">收录表示服务器保存了源码，不包含判题结果。</p></div></header><form class="toolbar" id="submission-filter"><label><span>学号</span><input id="f-student" placeholder="输入完整学号" value="${escapeHtml(state.filter.student_id)}"></label><label class="compact-field"><span>题号</span><input id="f-label" placeholder="例如 A" value="${escapeHtml(state.filter.label)}"></label><label class="compact-field"><span>语言</span><select id="f-language"><option value="">全部语言</option><option value="cpp">C++</option><option value="java">Java</option><option value="python3">Python 3</option></select></label><button type="submit" id="f-apply">筛选记录</button><button type="button" class="ghost" id="f-reset">重置</button></form><div class="table-scroll"><table class="paged-table"><thead><tr><th>编号</th><th>考生</th><th>题目</th><th>语言</th><th>收录时间</th><th>操作</th></tr></thead><tbody id="submissions-body">${submissionRows()}</tbody></table></div><div id="submissions-pagination">${pagination('submissions')}</div></section>`
 }
 function rulesPreview(value) {
   const rows = String(value)
@@ -632,12 +674,17 @@ function rulesPreview(value) {
     .map((s) => s.trim())
     .filter(Boolean)
   return rows.length
-    ? rows.map((row) => `<li>${escapeHtml(row)}</li>`).join('')
-    : '<li class="muted">暂无考生守则</li>'
+    ? rows
+        .map(
+          (row) =>
+            `<li${row.includes('！！！') ? ' class="rule-warning"' : ''}>${escapeHtml(row)}</li>`
+        )
+        .join('')
+    : '<li class="muted">暂无考生须知</li>'
 }
 function renderRules() {
   const value = state.rulesDraft ?? state.rules
-  return `<section class="surface"><div class="surface-body"><div class="section-head"><div><h2>考生守则</h2><p class="muted small">每行一条规则；保存后，考生端可读取最新内容。</p></div></div><div class="rules-editor"><label><span>编辑内容</span><textarea id="rules-text" rows="12" spellcheck="false" placeholder="每行填写一条规则">${escapeHtml(value)}</textarea></label><section class="rules-preview"><h3>考生端预览</h3><ol class="rules" id="rules-preview">${rulesPreview(value)}</ol></section></div><div class="row"><button class="primary" id="rules-save">保存考生守则</button><span class="muted small" id="rules-feedback" role="status">${value === state.rules ? '修改无需重启服务' : '当前修改尚未保存'}</span></div></div></section>`
+  return `<section class="surface"><div class="surface-body"><div class="section-head"><div><h2>考生须知</h2><p class="muted small">每行一条规则；保存后，考生端可读取最新内容。</p></div></div><div class="rules-editor"><label><span>编辑内容</span><textarea id="rules-text" rows="12" spellcheck="false" placeholder="每行填写一条规则">${escapeHtml(value)}</textarea></label><section class="rules-preview"><h3>考生端预览</h3><ol class="rules" id="rules-preview">${rulesPreview(value)}</ol></section></div><div class="row"><button class="primary" id="rules-save">保存考生须知</button><span class="muted small" id="rules-feedback" role="status">${value === state.rules ? '修改无需重启服务' : '当前修改尚未保存'}</span></div></div></section>`
 }
 async function loadRules() {
   if (state.rulesLoaded || state.tab !== 'rules') return
@@ -654,8 +701,45 @@ async function loadRules() {
     flash('error', error.message)
   }
 }
+function hasExam() {
+  return Boolean(state.status?.exam?.name && state.status?.problem_count)
+}
+function exportAvailable() {
+  return hasExam() && ['running', 'paused', 'finished'].includes(state.status?.exam?.state)
+}
+function renderImportStart() {
+  return `<section class="import-start" aria-labelledby="import-start-title"><div class="import-start-copy"><span class="eyebrow">考前准备</span><h2 id="import-start-title">先把考试带到这台电脑</h2><p>导入试题组准备的考试包，题面和考生名单就会一同就绪。</p></div><div class="import-dropzone" id="import-dropzone">${ui.icon('file')}<strong>将考试包拖到这里</strong><span>或<button class="text-button" data-import-open>选择考试包</button></span><small>ZIP 文件，保留原样，无需解压</small></div><details class="import-help"><summary>还没有考试包？</summary><p>请试题组在 OJ 的比赛详情点击「导出考试包」，再将下载的 ZIP 文件复制到这台考场电脑。</p></details></section>`
+}
+function renderPackageActions() {
+  if (state.tab !== 'overview' || !hasExam()) return ''
+  return `<div class="overview-file-actions" aria-label="考试文件"><button id="import-open">${ui.icon('file')}<span id="import-action-label">导入考试包</span></button><button id="export" class="primary">${ui.icon('download')}<span id="export-action-label">导出提交包</span></button></div>`
+}
+function applyPackageActions() {
+  const upload = document.getElementById('import-open')
+  if (upload) {
+    upload.disabled = state.importPreviewing
+    upload.setAttribute('aria-busy', String(state.importPreviewing))
+    document.getElementById('import-action-label').textContent = state.importPreviewing
+      ? '正在校验考试包…'
+      : '导入考试包'
+  }
+  const download = document.getElementById('export')
+  if (download) {
+    download.disabled = state.exporting || !exportAvailable()
+    download.setAttribute('aria-busy', String(state.exporting))
+    document.getElementById('export-action-label').textContent = state.exporting
+      ? '正在生成提交包…'
+      : '导出提交包'
+    download.title = exportAvailable()
+      ? '下载已收录代码，交给试题组测评'
+      : '开考后可导出已收录的代码'
+  }
+}
+function renderPreparedPackage(dialog) {
+  return `${ui.dialogHeader('提交包已生成')}<div class="handoff-file"><span class="handoff-file-icon">${ui.icon('file')}</span><div><strong>${escapeHtml(dialog.fileName)}</strong><span>提交包 · 保留 ZIP 原样</span></div></div><p class="dialog-description">点击“知道了”后，将触发浏览器下载。下载完成后，可在浏览器下载列表中查找此文件。</p><div class="handoff-next"><span class="eyebrow">下一步 · 交回试题组</span><h3>在 OJ 的这场比赛中导入</h3><p>把 ZIP 文件交给试题组，在 OJ 的「${escapeHtml(state.status?.exam?.name || '当前比赛')}」中点击「导入提交包」。</p></div><div class="dialog-actions"><button class="primary" id="download-done">知道了</button></div>`
+}
 function renderSystem() {
-  return `<section class="settings-section"><h2>比赛包导入</h2><p>导入将替换当前考试的题目、考生与提交记录，请先导出需要保留的提交包。</p><div class="file-picker"><input type="file" id="import-file" accept=".zip"><label for="import-file" class="file-btn">${ui.icon('file')}选择比赛包 (.zip)</label><span class="file-name" id="import-name">未选择文件</span></div><button id="import-btn">导入比赛包</button></section><section class="settings-section"><h2>管理员密码</h2><p>修改当前管理员的登录密码。</p><form id="pw-form" class="password-grid"><label><span>原密码</span><input name="old_password" type="password" autocomplete="current-password" required></label><label><span>新密码</span><input name="new_password" type="password" autocomplete="new-password" required></label><button class="primary" type="submit">修改密码</button></form></section><section class="card"><header><div><h2>操作记录</h2><p class="small muted">查看考试操作与例外处理的记录。</p></div><button class="text-button danger-text" id="audit-clear">清空记录…</button></header><div class="table-scroll"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit-body">${auditRows()}</tbody></table></div></section>`
+  return `<section class="settings-section"><h2>管理员密码</h2><p>修改当前管理员的登录密码。</p><form id="pw-form" class="password-grid"><label><span>新密码</span><input name="new_password" type="password" autocomplete="new-password" required></label><button class="primary" type="submit">修改密码</button></form></section><section class="card"><header><div><h2>操作记录</h2><p class="small muted">查看考试状态与考生管理等操作记录。</p></div><button class="text-button danger-text" id="audit-clear">清空记录…</button></header><div class="table-scroll"><table class="paged-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr></thead><tbody id="audit-body">${auditRows()}</tbody></table></div><div id="audit-pagination">${pagination('audit')}</div></section>`
 }
 function render() {
   if (!state.admin) {
@@ -670,10 +754,11 @@ function render() {
     rules: renderRules,
     system: renderSystem
   }
-  app.innerHTML = `<div class="page"><header class="topbar">${ui.brand('现场管理')}<span class="header-context">程序设计竞赛 · 现场管理</span><div class="header-actions"><button class="primary" id="export" ${state.exporting ? 'disabled aria-busy="true"' : ''}>${ui.icon('download')}${state.exporting ? '正在生成提交包…' : '导出提交包'}</button><span id="connection">${ui.connection(state.connection)}</span><button class="text-button quiet" id="refresh">${ui.icon('refresh')}刷新状态</button><button class="text-button quiet" id="logout">退出登录</button></div></header><div class="admin-shell"><nav class="sidebar" aria-label="管理导航"><span class="eyebrow">现场管理</span>${tabs.map(([key, title, icon]) => `<button data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${ui.icon(icon)}${title}</button>`).join('')}<div class="admin-identity">管理员<br><strong>${escapeHtml(state.admin.username || 'admin')}</strong></div></nav><main class="admin-main"><div id="banner" class="toast" aria-live="polite"></div><div class="page-header"><div><span class="eyebrow">JUSTCPC · 现场管理</span><h1>${active[1]}</h1></div><span class="small muted">${state.tab === 'overview' ? '收录源码，赛后统一评测' : escapeHtml(state.status?.exam?.name || '尚未导入比赛')}</span></div>${pages[state.tab]()}</main></div>${ui.footer()}</div>`
+  app.innerHTML = `<div class="page"><header class="topbar">${ui.brand('现场管理')}<span class="header-context">程序设计竞赛 · 现场管理</span><div class="header-actions"><span id="connection">${ui.connection(state.connection)}</span><button class="text-button quiet" id="refresh">${ui.icon('refresh')}刷新状态</button><button class="text-button quiet" id="logout">退出登录</button></div></header><div class="admin-shell"><nav class="sidebar" aria-label="管理导航"><span class="eyebrow">现场管理</span>${tabs.map(([key, title, icon]) => `<button data-tab="${key}" class="${state.tab === key ? 'active' : ''}" ${state.tab === key ? 'aria-current="page"' : ''}>${ui.icon(icon)}${title}</button>`).join('')}<div class="admin-identity">管理员<br><strong>${escapeHtml(state.admin.username || 'admin')}</strong></div></nav><main class="admin-main"><div id="banner" class="toast" aria-live="polite"></div><div class="page-header"><div><span class="eyebrow">JUSTCPC · 现场管理</span><h1>${active[1]}</h1></div>${state.tab === 'overview' ? renderPackageActions() : `<span class="small muted">${escapeHtml(state.status?.exam?.name || '尚未导入比赛')}</span>`}</div>${pages[state.tab]()}<input type="file" id="import-file" accept=".zip" hidden></main></div>${ui.footer()}</div>`
   for (const key of Object.keys(htmlCache)) delete htmlCache[key]
   renderBanner()
   bindCommon()
+  applyPackageActions()
   if (state.tab === 'overview') {
     bindOverview()
     applyOverview()
@@ -693,7 +778,8 @@ function render() {
   if (state.tab === 'system') bindSystem()
 }
 function bindCommon() {
-  document.getElementById('export').addEventListener('click', downloadSubmissionPackage)
+  bindPackageImport()
+  document.getElementById('export')?.addEventListener('click', downloadSubmissionPackage)
   document.getElementById('logout').addEventListener('click', logout)
   document.getElementById('refresh').addEventListener('click', async () => {
     try {
@@ -721,11 +807,11 @@ function bindContestants() {
   document.getElementById('people-status').value = state.peopleFilter.status
   document.getElementById('people-search').addEventListener('input', (event) => {
     state.peopleFilter.query = event.target.value.trim()
-    applyContestants()
+    loadPage('contestants', { page: 1 }).catch((error) => flash('error', error.message))
   })
   document.getElementById('people-status').addEventListener('change', (event) => {
     state.peopleFilter.status = event.target.value
-    applyContestants()
+    loadPage('contestants', { page: 1 }).catch((error) => flash('error', error.message))
   })
 }
 async function applyFilter(event) {
@@ -736,8 +822,7 @@ async function applyFilter(event) {
     language: document.getElementById('f-language').value
   }
   try {
-    state.submissions = await api('/admin/submissions' + queryString())
-    applySubmissions()
+    await loadPage('submissions', { page: 1 })
   } catch (error) {
     flash('error', error.message)
   }
@@ -772,7 +857,7 @@ function bindRules() {
       setText(
         'rules-feedback',
         (state.rulesDraft ?? state.rules) === state.rules
-          ? '考生守则已保存'
+          ? '考生须知已保存'
           : '已保存先前内容，当前新修改尚未保存'
       )
     } catch (error) {
@@ -783,12 +868,6 @@ function bindRules() {
   })
 }
 function bindSystem() {
-  const file = document.getElementById('import-file')
-  file.addEventListener('change', () => setText('import-name', file.files[0]?.name || '未选择文件'))
-  document.getElementById('import-btn').addEventListener('click', () => {
-    if (!file.files[0]) flash('error', '请选择比赛包 ZIP')
-    else showDialog({ importConfirm: true, file: file.files[0] })
-  })
   document
     .getElementById('audit-clear')
     .addEventListener('click', () => showDialog({ clearAudit: true }))
@@ -801,7 +880,6 @@ function bindSystem() {
       await api('/admin/password', {
         method: 'POST',
         body: JSON.stringify({
-          old_password: formValue(form, 'old_password'),
           new_password: formValue(form, 'new_password')
         })
       })
@@ -814,15 +892,62 @@ function bindSystem() {
     }
   })
 }
-async function downloadSubmissionPackage() {
-  if (state.exporting) return
-  state.exporting = true
-  const button = document.getElementById('export')
-  if (button) {
-    button.disabled = true
-    button.setAttribute('aria-busy', 'true')
-    button.innerHTML = `${ui.icon('download')}正在生成提交包…`
+function bindPackageImport() {
+  const file = document.getElementById('import-file')
+  app.querySelectorAll('#import-open, [data-import-open]').forEach((button) =>
+    button.addEventListener('click', () => {
+      if (!state.importPreviewing) file.click()
+    })
+  )
+  file.addEventListener('change', () => {
+    const selected = file.files[0]
+    file.value = ''
+    if (selected) previewExamPackage(selected)
+  })
+  const dropzone = document.getElementById('import-dropzone')
+  if (!dropzone) return
+  for (const name of ['dragenter', 'dragover'])
+    dropzone.addEventListener(name, (event) => {
+      event.preventDefault()
+      dropzone.classList.add('is-dragging')
+    })
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('is-dragging'))
+  dropzone.addEventListener('drop', (event) => {
+    event.preventDefault()
+    dropzone.classList.remove('is-dragging')
+    if (event.dataTransfer.files.length !== 1) {
+      flash('error', '请一次选择一个考试包')
+      return
+    }
+    previewExamPackage(event.dataTransfer.files[0])
+  })
+}
+async function previewExamPackage(file) {
+  if (state.importPreviewing || !state.admin) return
+  if (!/\.zip$/i.test(file.name)) {
+    flash('error', '请选择 OJ 导出的 ZIP 考试包，无需解压')
+    return
   }
+  state.importPreviewing = true
+  const owner = state.admin
+  applyPackageActions()
+  const data = new FormData()
+  data.append('file', file)
+  try {
+    const preview = await api('/admin/import-preview', { method: 'POST', body: data })
+    if (state.admin === owner) showDialog({ importConfirm: true, file, preview })
+  } catch (error) {
+    if (state.admin === owner) flash('error', error.message)
+  } finally {
+    state.importPreviewing = false
+    applyPackageActions()
+  }
+}
+async function downloadSubmissionPackage() {
+  if (state.exporting || !exportAvailable()) return
+  state.exporting = true
+  const owner = state.admin
+  applyPackageActions()
   try {
     const response = await fetch('/api/admin/export', {
       method: 'POST',
@@ -833,28 +958,47 @@ async function downloadSubmissionPackage() {
       throw new Error(data.error || `导出失败：${response.status}`)
     }
     const blob = await response.blob(),
-      match = /filename="?([^";]+)"?/.exec(response.headers.get('Content-Disposition') || '')
-    const url = URL.createObjectURL(blob),
-      anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = match ? match[1] : 'submission-package.zip'
-    anchor.click()
-    URL.revokeObjectURL(url)
-    flash('notice', '提交包已开始下载')
+      disposition = response.headers.get('Content-Disposition') || '',
+      encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition),
+      match = /filename="?([^";]+)"?/i.exec(disposition)
+    const fileName = encoded
+      ? decodeURIComponent(encoded[1])
+      : match
+        ? match[1]
+        : 'submission-package.zip'
+    if (state.admin !== owner) return false
+    showDialog({ preparedPackage: true, fileName, blob })
+    return true
   } catch (error) {
     flash('error', error.message)
+    return false
   } finally {
     state.exporting = false
-    const current = document.getElementById('export')
-    if (current) {
-      current.disabled = false
-      current.removeAttribute('aria-busy')
-      current.innerHTML = `${ui.icon('download')}导出提交包`
-    }
+    applyPackageActions()
   }
 }
-async function performExamAction(action, reason = '') {
-  await api('/admin/exam/' + action, { method: 'POST', body: JSON.stringify({ reason }) })
+function startPreparedDownload(dialog) {
+  if (state.dialog !== dialog || dialog.downloadStarted) return
+  let url, anchor
+  try {
+    url = URL.createObjectURL(dialog.blob)
+    anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = dialog.fileName
+    document.body.appendChild(anchor)
+    dialog.downloadStarted = true
+    anchor.click()
+    closeDialog()
+  } catch (error) {
+    dialog.downloadStarted = false
+    flash('error', '下载未能启动，请重试。')
+  } finally {
+    anchor?.remove()
+    if (url) setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+}
+async function performExamAction(action) {
+  await api('/admin/exam/' + action, { method: 'POST', body: JSON.stringify({}) })
   closeDialog()
   await refresh()
   render()
@@ -894,6 +1038,15 @@ function openEdit(id) {
   if (item) showDialog({ editContestant: item })
 }
 document.addEventListener('click', (event) => {
+  const pageButton = event.target.closest('[data-page-kind]')
+  if (pageButton && !pageButton.disabled) {
+    const kind = pageButton.dataset.pageKind
+    loadPage(kind, { page: Number(pageButton.dataset.page) }).catch((error) =>
+      flash('error', error.message)
+    )
+    return
+  }
+
   const source = event.target.closest('[data-source]')
   if (source) {
     viewSource(source.dataset.source)
@@ -927,22 +1080,27 @@ function renderDialog() {
     wide = false
   const exam = state.status?.exam || {}
   if (dialog.addContestant)
-    content = `${ui.dialogHeader('新增临时考生')}<p class="dialog-description">请核对身份信息，并记录现场补录原因。</p><form id="add-form"><label><span>学号</span><input name="student_id" required></label><label><span>姓名</span><input name="name" required></label><label><span>初始密码</span><input name="password" type="password" autocomplete="new-password" required></label><label><span>补录原因（可选）</span><input name="reason"></label>${dialogActions('新增考生')}</form>`
+    content = `${ui.dialogHeader('新增临时考生')}<p class="dialog-description">请核对考生学号、姓名并设置登录密码。</p><form id="add-form"><label><span>学号</span><input name="student_id" required></label><label><span>姓名</span><input name="name" required></label><label><span>初始密码</span><input name="password" type="password" autocomplete="new-password" required></label>${dialogActions('新增考生')}</form>`
   else if (dialog.editContestant) {
     const c = dialog.editContestant
-    content = `${ui.dialogHeader('管理考生 · ' + c.student_id)}<form id="edit-form"><label><span>姓名</span><input name="name" value="${escapeHtml(c.name)}"></label><label><span>重置密码（留空不改）</span><input name="password" type="password" autocomplete="new-password"></label><h3 class="section-title">账户与交卷状态</h3><label class="check"><input type="checkbox" name="disabled" ${c.disabled ? 'checked' : ''}><span>禁用账户</span></label><label class="check"><input type="checkbox" name="finished" ${c.finished ? 'checked' : ''}><span>标记为已交卷</span></label><label><span>例外操作原因（可选）</span><input name="reason"></label>${dialogActions('保存考生信息')}</form>`
-  } else if (dialog.importConfirm)
-    content = `${ui.dialogHeader('确认导入比赛包？')}<p class="dialog-description">文件：${escapeHtml(dialog.file.name)}</p><div class="state-note"><h3>当前考试数据将被替换</h3><p>题目、考生及提交记录都会被替换，请先导出需要保留的提交包。</p></div><form id="import-form">${dialogActions('确认替换并导入', true)}</form>`
+    content = `${ui.dialogHeader('管理考生 · ' + c.student_id)}<form id="edit-form"><label><span>姓名</span><input name="name" value="${escapeHtml(c.name)}"></label><label><span>重置密码（留空不改）</span><input name="password" type="password" autocomplete="new-password"></label><h3 class="section-title">账户与交卷状态</h3><label class="check"><input type="checkbox" name="disabled" ${c.disabled ? 'checked' : ''}><span>禁用账户</span></label><label class="check"><input type="checkbox" name="finished" ${c.finished ? 'checked' : ''}><span>标记为已交卷</span></label>${dialogActions('保存考生信息')}</form>`
+  } else if (dialog.importConfirm) {
+    const replacing = hasExam()
+    content = `${ui.dialogHeader(replacing ? '确认更换当前考试？' : '确认导入这场考试')}<div class="handoff-file"><span class="handoff-file-icon">${ui.icon('file')}</span><div><strong>${escapeHtml(dialog.file.name)}</strong><span>考试包 · 来自试题组 OJ</span></div></div><div class="import-exam-summary"><h3>${escapeHtml(dialog.preview.name)}</h3><p>${dialog.preview.problem_count} 道题 · ${dialog.preview.contestant_count} 位考生</p></div><details class="import-problems"><summary>核对题目</summary><div class="table-scroll"><table><thead><tr><th>题号</th><th>标题</th></tr></thead><tbody>${dialog.preview.problems.map((p) => `<tr><td>${escapeHtml(p.label)}</td><td>${escapeHtml(p.title)}</td></tr>`).join('')}</tbody></table></div></details>${replacing ? `<div class="state-note"><h3>将替换「${escapeHtml(exam.name)}」</h3><p>当前 ${state.status?.submission_count ?? 0} 份代码及现有考试数据将被移除，请先导出需要保留的提交包。</p></div>` : ''}<form id="import-form"><label class="check"><input type="checkbox" name="confirmed" required><span>${replacing ? '已核对新考试，并保留需要的提交包' : '比赛名称、题目和考生人数已核对'}</span></label>${dialogActions(replacing ? '确认更换考试' : '导入并安排考试时间', replacing)}</form>`
+  } else if (dialog.preparedPackage) content = renderPreparedPackage(dialog)
   else if (dialog.clearAudit)
     content = `${ui.dialogHeader('清空操作记录？')}<p class="dialog-description">现有审计日志将全部删除，此操作不可恢复。</p><form id="clear-audit-form">${dialogActions('确认清空记录', true)}</form>`
   else if (dialog.examAction) {
     const abort = dialog.examAction === 'abort'
-    content = `${ui.dialogHeader(abort ? '中止当前考试？' : '暂停当前考试？')}<p class="dialog-description">${escapeHtml(exam.name || '当前比赛')}</p><div class="state-note"><p>${abort ? '所有考生将停止提交，本场考试会结束。请先确认现场安排。' : '暂停后所有考生暂时无法提交，考试结束时间仍按原安排执行。'}</p></div><form id="exam-action-form"><label><span>操作原因（可选）</span><input name="reason"></label>${dialogActions(abort ? '确认中止考试' : '确认暂停考试', abort)}</form>`
+    content = `${ui.dialogHeader(abort ? '中止当前考试？' : '暂停当前考试？')}<p class="dialog-description">${escapeHtml(exam.name || '当前比赛')}</p><div class="state-note"><p>${abort ? '所有考生将停止提交，本场考试会结束。请先确认现场安排。' : '暂停后所有考生暂时无法提交，考试结束时间仍按原安排执行。'}</p></div><form id="exam-action-form">${dialogActions(abort ? '确认中止考试' : '确认暂停考试', abort)}</form>`
   } else {
     wide = true
     content = `${ui.dialogHeader(dialog.title || '源码')}<div class="dialog-meta"><span>${escapeHtml(dialog.meta || '')}</span><button id="copy-source">${ui.icon('copy')}复制源码</button></div><pre class="code">${escapeHtml(dialog.code || '')}</pre>`
   }
   ui.openDialog(content, closeDialog, wide)
+  document
+    .getElementById('download-done')
+    ?.addEventListener('click', () => startPreparedDownload(dialog))
   for (const id of ['dialog-cancel', 'dialog-secondary'])
     document.getElementById(id)?.addEventListener('click', closeDialog)
   document
@@ -961,22 +1119,18 @@ function renderDialog() {
         }
       })
     })
-  bind('exam-action-form', (form) =>
-    performExamAction(dialog.examAction, formValue(form, 'reason'))
-  )
+  bind('exam-action-form', (form) => performExamAction(dialog.examAction))
   bind('add-form', async (form) => {
     await api('/admin/contestants', {
       method: 'POST',
       body: JSON.stringify({
         student_id: formValue(form, 'student_id'),
         name: formValue(form, 'name'),
-        password: formValue(form, 'password'),
-        reason: formValue(form, 'reason')
+        password: formValue(form, 'password')
       })
     })
     closeDialog()
-    state.contestants = await api('/admin/contestants')
-    applyContestants()
+    await loadPage('contestants')
     flash('notice', '已新增考生')
   })
   bind('edit-form', async (form) => {
@@ -986,34 +1140,38 @@ function renderDialog() {
         name: formValue(form, 'name'),
         password: formValue(form, 'password'),
         disabled: formChecked(form, 'disabled'),
-        finished: formChecked(form, 'finished'),
-        reason: formValue(form, 'reason')
+        finished: formChecked(form, 'finished')
       })
     })
     closeDialog()
-    state.contestants = await api('/admin/contestants')
-    applyContestants()
+    await loadPage('contestants')
     flash('notice', '考生信息已保存')
   })
   bind('import-form', async () => {
     const form = new FormData()
     form.append('file', dialog.file)
+    form.append('confirmed', 'true')
     const item = await api('/admin/import', { method: 'POST', body: form })
     state.timeEditor = null
     state.timeDrafts = {}
+    for (const page of Object.values(state.pagination)) page.page = 1
     state.rulesLoaded = false
     state.rulesDraft = null
     state.rules = ''
     closeDialog()
-    await refresh()
-    render()
-    flash('notice', `已导入：${item.name}`)
+    state.tab = 'overview'
+    try {
+      await refresh()
+      openTimeEditor('schedule')
+    } catch {
+      render()
+      flash('notice', `「${item.name}」已导入，请刷新状态后安排考试时间。`)
+    }
   })
   bind('clear-audit-form', async () => {
     await api('/admin/audit', { method: 'DELETE' })
     closeDialog()
-    state.audit = (await api('/admin/audit')) || []
-    applyAudit()
+    await loadPage('audit', { page: 1 })
     flash('notice', '操作记录已清空')
   })
 }
@@ -1029,10 +1187,12 @@ function tickExam() {
     phase = examClock(exam).phase
   setText('countdown', ui.clockValue(exam))
   setText('countdown-label', ui.clockLabel(exam))
+  const overviewTimer = document.getElementById('overview-timer')
+  if (overviewTimer) overviewTimer.hidden = examDisplayState(exam) === 'finished'
   setHTML('exam-state', examChip(examDisplayState(exam)))
   setHTML('exam-actions', examActions())
   const schedule = document.getElementById('schedule-btn')
-  if (schedule) schedule.hidden = !canSchedule(exam)
+  if (schedule) schedule.hidden = !canSchedule(exam) || Boolean(state.timeEditor)
   const abort = document.getElementById('abort-exam')
   if (abort) abort.hidden = !['running', 'paused'].includes(examDisplayState(exam))
   if (state.phase && state.phase !== phase) {
@@ -1044,7 +1204,16 @@ function tickExam() {
       refreshActive()
     }
   }
+  applyPackageActions()
   state.phase = phase
 }
+document.addEventListener('change', (event) => {
+  const select = event.target.closest('[data-page-size]')
+  if (!select) return
+  loadPage(select.dataset.pageSize, { page: 1, page_size: Number(select.value) }).catch((error) =>
+    flash('error', error.message)
+  )
+})
+
 setInterval(tickExam, 1000)
 boot()

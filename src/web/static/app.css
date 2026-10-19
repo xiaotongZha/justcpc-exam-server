@@ -350,6 +350,7 @@ h3 {
   flex: 1;
 }
 .login-intro h1 {
+  text-wrap: balance;
   font-size: 32px;
   margin: 12px 0;
 }
@@ -379,6 +380,9 @@ h3 {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 30px;
+}
+.login-form h2 {
+  margin-bottom: 18px;
 }
 .login-form > .muted {
   font-size: 13px;
@@ -413,10 +417,6 @@ h3 {
 .exam-header h1 {
   overflow-wrap: anywhere;
   margin: 10px 0 8px;
-}
-.exam-header .identity {
-  color: var(--muted);
-  font-size: 13px;
 }
 .exam-context {
   display: flex;
@@ -641,6 +641,10 @@ td.actions button + button {
 .rules li {
   padding: 3px 0 3px 4px;
 }
+.rules li.rule-warning {
+  color: var(--red);
+  font-weight: 700;
+}
 .rules-actions {
   margin-top: 24px;
   display: flex;
@@ -648,47 +652,41 @@ td.actions button + button {
   gap: 14px;
   flex-wrap: wrap;
 }
-.waiting {
-  max-width: 850px;
-  margin: auto;
+.waiting-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
-.waiting-hero {
-  padding: 8px 0 22px;
-  border-bottom: 1px solid var(--border);
-}
-.waiting-hero h2 {
-  font-size: 24px;
-  margin-bottom: 9px;
-}
-.waiting-hero p {
-  color: var(--muted);
-}
-.waiting-grid {
+.waiting-state-icon {
   display: grid;
-  grid-template-columns: 1.2fr 1fr;
-  gap: 36px;
-  padding: 26px 0;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--amber);
+  background: var(--amber-soft);
 }
-.waiting-grid ol {
-  padding-left: 20px;
+.waiting-state-icon .icon {
+  width: 23px;
+  height: 23px;
+}
+.waiting-state h2 {
+  font-size: 20px;
+  margin: 0 0 6px;
+  line-height: 1.5;
+}
+.waiting-state p {
+  margin: 0;
   color: var(--muted);
-  line-height: 2;
-  margin: 10px 0 18px;
 }
-.waiting-download {
-  padding-left: 30px;
-  border-left: 1px solid var(--border);
-}
-.waiting-download > .icon {
-  width: 28px;
-  height: 28px;
-  color: var(--primary);
-  margin-bottom: 10px;
-}
-.waiting-download p {
-  font-size: 13px;
-  color: var(--muted);
-  margin: 8px 0 18px;
+.waiting-state .waiting-file-note {
+  margin-top: 16px;
+  font-size: 12px;
 }
 .student-bottom {
   display: flex;
@@ -1081,10 +1079,10 @@ td.actions button + button {
 }
 .password-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: end;
-  max-width: 800px;
+  max-width: 480px;
 }
 .password-grid label {
   margin: 0;
@@ -1257,9 +1255,6 @@ pre.code {
   .header-context {
     display: none;
   }
-  .password-grid {
-    grid-template-columns: 1fr 1fr;
-  }
   .password-grid button {
     justify-self: start;
   }
@@ -1346,12 +1341,10 @@ pre.code {
   .login-form {
     padding: 24px;
   }
-  .waiting-grid,
   .rules-editor,
   .password-grid {
     grid-template-columns: 1fr;
   }
-  .waiting-download,
   .rules-preview {
     border-left: 0;
     padding-left: 0;
@@ -1414,4 +1407,395 @@ pre.code {
   *::after {
     transition: none !important;
   }
+}
+
+/* 主要操作跟随当前任务，学生身份与考试状态使用同一个页头。 */
+.overview-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.overview-file-actions button {
+  min-height: 42px;
+  padding: 10px 18px;
+  font-weight: 600;
+}
+.student-masthead {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px 28px 0;
+  margin-bottom: 12px;
+}
+.student-exam-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 20px;
+}
+.student-exam-title h1 {
+  font-size: 25px;
+  margin: 10px 0 4px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.student-exam-title p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.student-exam-title .timer strong {
+  font-size: 30px;
+  letter-spacing: 1px;
+}
+.student-session {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.student-person {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.student-person > strong {
+  font-size: 20px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.student-person > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.student-person b {
+  margin-left: 6px;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+button.finish-exam {
+  flex: none;
+  min-height: 40px;
+  color: var(--red);
+  border-color: #d9acb2;
+  font-weight: 600;
+  padding-inline: 18px;
+}
+button.finish-exam:hover {
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+.student-session-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex-shrink: 0;
+}
+button.statement-download {
+  min-height: 42px;
+  min-width: 132px;
+  padding: 10px 20px;
+  font-weight: 600;
+}
+.student-receipt header {
+  padding: 20px 24px;
+}
+.student-receipt header h2 {
+  font-size: 18px;
+}
+.student-receipt header p {
+  font-weight: 400;
+  margin: 5px 0 0;
+}
+.receipt-totals {
+  text-align: right;
+  flex-shrink: 0;
+}
+.receipt-totals strong {
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.receipt-totals small {
+  font-size: 12px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+.receipt-totals > span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+@media (max-width: 600px) {
+  .student-masthead {
+    padding: 18px 18px 0;
+  }
+  .student-exam-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .student-exam-title h1 {
+    font-size: 22px;
+  }
+  .student-exam-title .timer {
+    text-align: left;
+  }
+  .student-session {
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .student-person {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .student-session {
+    flex-wrap: wrap;
+  }
+  .student-session-actions {
+    width: 100%;
+  }
+  button.statement-download {
+    flex: 1;
+  }
+  .waiting-state {
+    gap: 12px;
+    padding: 20px;
+  }
+  .waiting-state-icon {
+    width: 36px;
+    height: 36px;
+  }
+  .waiting-state h2 {
+    font-size: 18px;
+  }
+  .student-receipt header {
+    padding: 18px;
+    align-items: flex-start;
+  }
+  .student-receipt header p {
+    max-width: 190px;
+  }
+  .overview-file-actions {
+    width: 100%;
+  }
+}
+.import-start {
+  max-width: 960px;
+  margin: 20px auto 0;
+  padding: 40px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.import-start-copy h2 {
+  font-size: 28px;
+  margin: 10px 0 12px;
+  letter-spacing: -0.5px;
+}
+.import-start-copy p {
+  color: var(--muted);
+  margin: 0;
+}
+.import-dropzone {
+  margin: 30px 0 20px;
+  padding: 36px 20px;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 8px;
+  border: 1.5px dashed #bdc8df;
+  background: #fafbff;
+  border-radius: 12px;
+  transition: background 0.15s;
+}
+.import-dropzone > .icon {
+  width: 38px;
+  height: 38px;
+  color: var(--primary);
+  margin-bottom: 8px;
+}
+.import-dropzone strong {
+  font-size: 17px;
+}
+.import-dropzone span {
+  color: var(--muted);
+}
+.import-dropzone button {
+  margin-left: 8px;
+}
+.import-dropzone small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.import-dropzone.is-dragging {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.import-help {
+  color: var(--muted);
+  font-size: 13px;
+}
+.import-help summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.import-help p {
+  margin: 12px 0 0;
+  max-width: 560px;
+}
+.handoff-file {
+  display: flex;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 12px 0 24px;
+  background: #fafbfe;
+}
+.handoff-file-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 48px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  flex: none;
+}
+.handoff-file-icon .icon {
+  width: 25px;
+  height: 25px;
+}
+.handoff-file > div {
+  min-width: 0;
+}
+.handoff-file strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.handoff-file div > span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.handoff-next h3 {
+  margin: 8px 0;
+  font-size: 20px;
+}
+.handoff-next p {
+  color: var(--muted);
+  margin: 8px 0;
+}
+.import-exam-summary h3 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+.import-exam-summary p {
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+.import-problems {
+  margin-bottom: 20px;
+}
+.import-problems summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 13px;
+}
+.import-problems .table-scroll {
+  max-height: 240px;
+  margin-top: 10px;
+}
+@media (max-width: 800px) {
+  .header-context {
+    display: none;
+  }
+  .header-actions {
+    gap: 8px;
+  }
+  .import-start {
+    padding: 24px;
+  }
+  .import-start-copy h2 {
+    font-size: 24px;
+  }
+}
+@media (max-width: 1150px) {
+  .header-context {
+    display: none;
+  }
+}
+
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+.pagination-total {
+  margin-right: auto;
+}
+.page-size {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
+  margin: 0;
+  white-space: nowrap;
+}
+.page-size select {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.page-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.page-buttons button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.page-buttons button[aria-current='page'] {
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: var(--primary-soft);
+  opacity: 1;
+}
+.page-ellipsis {
+  padding: 0 3px;
+}
+@media (max-width: 600px) {
+  .table-pagination {
+    padding: 14px 16px;
+    gap: 12px;
+  }
+  .page-buttons {
+    justify-content: flex-end;
+    flex-basis: 100%;
+  }
+}
+
+.paged-table {
+  min-width: 640px;
 }

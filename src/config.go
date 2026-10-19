@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 )
 
 // config 汇集启动配置，全部由 config.json 提供。密文字段可由同名环境变量补充。
@@ -54,6 +55,23 @@ func loadConfig(path string) (config, error) {
 	if cfg.StatementPassword == "" {
 		cfg.StatementPassword = "GoJustCPC"
 	}
+	// Release packages include an editable config before the first launch.
+	// Complete only blank credentials; environment-provided values stay in the environment.
+	effective := applyEnv(cfg)
+	changed := false
+	if effective.SessionSecret == "" {
+		cfg.SessionSecret = randomToken(48)
+		changed = true
+	}
+	if effective.AdminPassword == "" {
+		cfg.AdminPassword = randomPassword(12)
+		changed = true
+	}
+	if changed {
+		if err := writeConfig(path, cfg); err != nil {
+			return cfg, fmt.Errorf("补全配置文件失败（目录不可写？）：%w", err)
+		}
+	}
 	return applyEnv(cfg), nil
 }
 
@@ -63,13 +81,31 @@ func generateConfig(path string) (config, error) {
 	cfg := defaultConfig()
 	cfg.SessionSecret = randomToken(48)
 	cfg.AdminPassword = randomPassword(12)
-	encoded, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(path, encoded, 0600); err != nil {
+	if err := writeConfig(path, cfg); err != nil {
 		return cfg, fmt.Errorf("生成配置文件失败（目录不可写？）：%w", err)
 	}
 	log.Printf("已生成配置文件 %s", path)
-	log.Printf("初始管理员账号：%s / %s  （首次登录后请立即修改密码）", cfg.AdminUsername, cfg.AdminPassword)
 	return cfg, nil
+}
+
+func writeConfig(path string, cfg config) error {
+	encoded, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 func applyEnv(cfg config) config {

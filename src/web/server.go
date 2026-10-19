@@ -60,6 +60,7 @@ func (s Server) Handler() *gin.Engine {
 	router.GET("/", func(c *gin.Context) { serveEmbedded(c, "index.html") })
 	router.GET("/admin", func(c *gin.Context) { serveEmbedded(c, "admin.html") })
 
+	router.GET("/api/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "justcpc-exam-server"}) })
 	api := router.Group("/api")
 	api.POST("/login", s.studentLogin)
 	api.POST("/logout", s.studentLogout)
@@ -96,6 +97,7 @@ func (s Server) Handler() *gin.Engine {
 	adminProtected.PUT("/exam/schedule", s.adminSchedule)
 	adminProtected.PUT("/exam/restart", s.adminRestart)
 	adminProtected.POST("/import", s.adminImport)
+	adminProtected.POST("/import-preview", s.adminImport)
 	adminProtected.POST("/export", s.adminExport)
 	adminProtected.GET("/audit", s.adminAudit)
 	adminProtected.DELETE("/audit", s.adminClearAudit)
@@ -118,14 +120,14 @@ func (s Server) requireStudent(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "请先登录"})
 		return
 	}
-	valid, err := s.Exam.StudentSessionValid(c, value.ID, value.ExamGeneration)
+	valid, err := s.Exam.StudentSessionValid(c.Request.Context(), value.ID, value.ExamGeneration, value.SessionVersion)
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	if !valid {
 		s.sessions.clear(c.Writer, studentCookie)
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "考试已更换，请重新登录"})
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "登录已失效，可能已交卷、账号被禁用或考试已更换，请联系监考员"})
 		return
 	}
 	if s.activity != nil {

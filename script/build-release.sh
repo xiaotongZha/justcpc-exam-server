@@ -5,15 +5,15 @@ set -euo pipefail
 # 产物（在 release/ 下）：
 #   ExamServer-<version>-windows/ ... + ExamServer-<version>-windows.zip
 #   ExamServer-<version>-linux/   ... + ExamServer-<version>-linux.tar.gz
-# 每个发行目录含：可执行文件、config.example.json、启停脚本、使用说明、README。
-# 首次运行会在目录内自动生成 config.json（随机密钥）并打印初始管理员密码。
+# 每个发行目录含可执行文件、config.json 与使用说明。
+# 首次运行补全留空的密钥与初始管理员密码，data/ 自动创建。
 #
-# 用法：./script/build-release.sh            （版本默认 0.1.0）
-#       VERSION=0.2.0 ./script/build-release.sh
+# 用法：./script/build-release.sh            （版本默认 1.0.0）
+#       VERSION=1.0.0 ./script/build-release.sh
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "$script_dir/.." && pwd)"
-version="${VERSION:-0.1.0}"
+version="${VERSION:-1.0.0}"
 release_root="$project_dir/release"
 
 if ! command -v go >/dev/null 2>&1; then
@@ -29,10 +29,12 @@ build_platform() {
     printf '==> 编译 %s/%s\n' "$goos" "amd64"
     rm -rf "$dir"
     mkdir -p "$dir"
+    local build_flags="-s -w"
+    if [[ "$goos" == "windows" ]]; then build_flags="$build_flags -H windowsgui"; fi
     ( cd "$project_dir"; CGO_ENABLED=0 GOOS="$goos" GOARCH=amd64 \
-        go build -trimpath -ldflags "-s -w" -o "$dir/$binname" ./src )
-    cp "$project_dir/config.example.json" "$dir/config.example.json"
-    cp "$project_dir/README.md" "$dir/README.md"
+        go build -trimpath -ldflags "$build_flags" -o "$dir/$binname" ./src )
+    cp "$project_dir/config.example.json" "$dir/config.json"
+    chmod 600 "$dir/config.json"
 }
 
 mkdir -p "$release_root"
@@ -40,53 +42,36 @@ mkdir -p "$release_root"
 # ---------- Windows ----------
 build_platform windows ExamServer.exe
 win="$release_root/ExamServer-$version-windows"
-cat > "$win/start-exam.bat" <<'EOF'
-@echo off
-cd /d "%~dp0"
-echo JustCPC Exam Server
-echo 选手入口: http://本机IP:10293/    管理员入口: http://本机IP:10293/admin
-ExamServer.exe
-pause
-EOF
-cat > "$win/stop-exam.bat" <<'EOF'
-@echo off
-taskkill /IM ExamServer.exe /F
-pause
-EOF
 cat > "$win/使用说明.txt" <<'EOF'
-JustCPC 机房考试服务 —— 现场管理员
-1. 把整个文件夹解压到任意可写目录（Windows 请勿放 Program Files）。
-2. 双击 start-exam.bat 启动。首次运行会自动生成 config.json，并在窗口打印初始管理员账号密码。
-3. 选手访问 http://本机IP:10293/ ，管理员访问 http://本机IP:10293/admin 。
-4. 首次登录后请立即修改管理员密码。
-5. 运行数据在 data/ 目录（首次运行自动创建）；备份时整包拷贝 data/ 即可。
+JustCPC 机房考试服务
+1. 完整解压到可写目录（勿放 Program Files）。首次启动前，可编辑 config.json 设置端口、管理员账号/初始密码、试题解压密码。
+2. 双击 ExamServer.exe，点击“打开管理页面”。留空的初始密码与会话密钥首次启动自动生成并保存，data/ 自动创建。
+3. 初始管理员账号密码、当前试题解压密码在启动窗口显示，解压密码开考时告知考生。
+4. 修改端口（listen）、初始管理员密码（admin_password）或解压密码（statement_password）：先点击“停止并退出”，修改 config.json 后重新启动。初始密码仅首次创建账号生效，已有账号请在管理页“系统设置”修改密码。
+5. 考生访问 http://本机IP:10293/；管理员访问 http://本机IP:10293/admin（端口以配置为准）。无法连接时检查防火墙和考场网络。
+6. 管理页“考场总览”导入 OJ 导出的考试包，设定考试时间；考后导出提交包交回 OJ。
+7. 最小化窗口不影响考试；停止服务用“停止并退出”。日志为 exam-server.log。
+8. 升级先停止服务，保留 data/ 和 config.json，仅替换 EXE；备份需同时保存 data/ 和 config.json。
 EOF
 
 # ---------- Linux ----------
 build_platform linux justcpc-exam-server
 lin="$release_root/ExamServer-$version-linux"
-cat > "$lin/start-exam.sh" <<'EOF'
-#!/usr/bin/env bash
-cd "$(dirname "$0")"
-exec ./justcpc-exam-server
-EOF
-cat > "$lin/stop-exam.sh" <<'EOF'
-#!/usr/bin/env bash
-pkill -f 'justcpc-exam-server' || true
-EOF
-chmod +x "$lin/start-exam.sh" "$lin/stop-exam.sh" "$lin/justcpc-exam-server"
+chmod +x "$lin/justcpc-exam-server"
 cat > "$lin/使用说明.txt" <<'EOF'
-JustCPC 机房考试服务 —— 现场管理员
-1. 把整个文件夹解压到任意可写目录。
-2. 运行 ./start-exam.sh 启动（或直接执行 ./justcpc-exam-server）。首次运行会自动生成 config.json，并打印初始管理员账号密码。
-3. 选手访问 http://本机IP:10293/ ，管理员访问 http://本机IP:10293/admin 。
-4. 首次登录后请立即修改管理员密码。
-5. 运行数据在 data/ 目录（首次运行自动创建）；备份时整包拷贝 data/ 即可。
+JustCPC 机房考试服务
+1. 完整解压到可写目录。首次启动前，可编辑 config.json 设置端口、管理员账号/初始密码、试题解压密码。
+2. 在解压目录运行 ./justcpc-exam-server，保持终端运行；Ctrl+C 停止。留空的初始密码与会话密钥首次启动自动生成并保存，data/ 自动创建。
+3. 考生访问 http://本机IP:10293/，管理员访问 http://本机IP:10293/admin（端口以配置为准）。
+4. 初始管理员账号密码、当前试题解压密码在启动终端显示，解压密码开考时告知考生。
+5. 修改端口（listen）、初始管理员密码（admin_password）或解压密码（statement_password）：先停止服务，修改 config.json 后重新启动。初始密码仅首次创建账号生效，已有账号请在管理页“系统设置”修改密码。
+6. 管理页“考场总览”导入 OJ 导出的考试包，设定考试时间；考后导出提交包交回 OJ。
+7. 升级先停止服务，保留 data/ 和 config.json，仅替换可执行文件；备份需同时保存 data/ 和 config.json。
 EOF
 
 # ---------- 打包 ----------
 python3 - "$release_root" "$version" <<'PY'
-import os, sys, zipfile, tarfile
+import os, sys, zipfile, tarfile, hashlib
 root, version = sys.argv[1], sys.argv[2]
 win = os.path.join(root, f"ExamServer-{version}-windows")
 lin = os.path.join(root, f"ExamServer-{version}-linux")
@@ -101,6 +86,14 @@ with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
 tgz_path = os.path.join(root, f"ExamServer-{version}-linux.tar.gz")
 with tarfile.open(tgz_path, "w:gz") as t:
     t.add(lin, arcname=os.path.basename(lin))
+
+for archive in (zip_path, tgz_path):
+    digest = hashlib.sha256()
+    with open(archive, "rb") as package:
+        for chunk in iter(lambda: package.read(1024 * 1024), b""):
+            digest.update(chunk)
+    with open(archive + ".sha256", "w") as checksum:
+        checksum.write(digest.hexdigest() + "  " + os.path.basename(archive) + "\n")
 
 print("windows:", zip_path, os.path.getsize(zip_path), "bytes")
 print("linux:  ", tgz_path, os.path.getsize(tgz_path), "bytes")
