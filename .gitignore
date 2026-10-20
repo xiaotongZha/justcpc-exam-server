@@ -4,3 +4,7 @@ bin/
 release/
 *.log
 /test/
+
+__pycache__/
+
+/build/
