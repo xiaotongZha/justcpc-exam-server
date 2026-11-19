@@ -88,7 +88,7 @@ go run ./src
 
 ## 构建发行版
 
-`VERSION=1.0.1 ./script/build-release.sh` 构建应用并将发行包输出到 `build/release/`。Linux 包含本项目的安装、更新、卸载脚本；安装过程不需要 Go 或其他语言运行环境。Windows 仅保留程序、config.json 与使用说明。
+`VERSION=1.0.2 ./script/build-release.sh` 构建应用并将发行包输出到 `build/release/`。Linux 包含本项目的安装、更新、卸载脚本；安装过程不需要 Go 或其他语言运行环境。Windows 仅保留程序、config.json 与使用说明。
 
 ## 项目目录
 

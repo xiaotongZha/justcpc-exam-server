@@ -8,12 +8,12 @@ set -euo pipefail
 # Windows 目录含可执行文件、config.json 与使用说明；Linux 另含三个管理入口。
 # 首次运行补全留空的密钥与初始管理员密码，data/ 自动创建。
 #
-# 用法：./script/build-release.sh            （版本默认 1.0.1）
-#       VERSION=1.0.1 ./script/build-release.sh
+# 用法：./script/build-release.sh            （版本默认 1.0.2）
+#       VERSION=1.0.2 ./script/build-release.sh
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "$script_dir/.." && pwd)"
-version="${VERSION:-1.0.1}"
+version="${VERSION:-1.0.2}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'Invalid VERSION.\n' >&2; exit 2; }
 release_root="$project_dir/build/release"
 

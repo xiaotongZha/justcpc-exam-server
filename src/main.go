@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -104,22 +106,38 @@ func runServer(ctx context.Context, configPath string, ready func(startupInfo)) 
 
 	info := serverAddresses(listener.Addr().String())
 	info.StatementPassword = service.StatementPasswordOr()
-	// 只有本机健康检查成功后才显示运行中、打开管理页。
+	// Check both the API and browser assets before reporting a successful start.
 	probeCtx, stopProbe := context.WithTimeout(ctx, 3*time.Second)
 	defer stopProbe()
-	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimSuffix(info.AdminURL, "/admin")+"/api/health", nil)
-	if err != nil {
-		return err
-	}
 	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 3 * time.Second}
 	defer client.CloseIdleConnections()
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("本机启动检查失败：%w", err)
+	checks := []struct{ path, contentType string }{
+		{"/api/health", "application/json"},
+		{"/assets/app.css", "text/css"},
+		{"/assets/clock.js", "text/javascript"},
+		{"/assets/ui.js", "text/javascript"},
+		{"/assets/student.js", "text/javascript"},
+		{"/assets/admin.js", "text/javascript"},
+		{"/assets/logos/contest.png", "image/png"},
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("本机启动检查失败：HTTP %d", response.StatusCode)
+	for _, check := range checks {
+		request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimSuffix(info.AdminURL, "/admin")+check.path, nil)
+		if err != nil {
+			return err
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return fmt.Errorf("本机启动检查失败 %s：%w", check.path, err)
+		}
+		size, readErr := io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("本机启动检查失败 %s：%w", check.path, readErr)
+		}
+		contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+		if response.StatusCode != http.StatusOK || contentType != check.contentType || size == 0 {
+			return fmt.Errorf("本机启动检查失败 %s：HTTP %d，Content-Type=%q，响应长度=%d", check.path, response.StatusCode, response.Header.Get("Content-Type"), size)
+		}
 	}
 	if admins == 0 {
 		info.InitialLogin = fmt.Sprintf("初始管理员：%s / %s（登录后请修改密码）", cfg.AdminUsername, cfg.AdminPassword)

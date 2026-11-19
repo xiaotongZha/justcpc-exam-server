@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"path"
 	"strconv"
 	"time"
 
@@ -56,7 +57,24 @@ func (s Server) Handler() *gin.Engine {
 	router.Use(gin.Logger(), gin.Recovery())
 
 	sub, _ := fs.Sub(staticFiles, "static")
-	router.GET("/assets/*filepath", gin.WrapH(http.StripPrefix("/assets/", http.FileServer(http.FS(sub)))))
+	assets := http.StripPrefix("/assets/", http.FileServer(http.FS(sub)))
+	router.GET("/assets/*filepath", func(c *gin.Context) {
+		// Windows file associations can override Go's MIME defaults. These
+		// embedded assets must have the same types on every server machine.
+		contentType := "application/octet-stream"
+		switch path.Ext(c.Param("filepath")) {
+		case ".css":
+			contentType = "text/css; charset=utf-8"
+		case ".js":
+			contentType = "text/javascript; charset=utf-8"
+		case ".png":
+			contentType = "image/png"
+		case ".html":
+			contentType = "text/html; charset=utf-8"
+		}
+		c.Header("Content-Type", contentType)
+		assets.ServeHTTP(c.Writer, c.Request)
+	})
 	router.GET("/", func(c *gin.Context) { serveEmbedded(c, "index.html") })
 	router.GET("/admin", func(c *gin.Context) { serveEmbedded(c, "admin.html") })
 
